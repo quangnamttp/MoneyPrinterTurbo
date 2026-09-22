@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.11-slim-bullseye
+FROM python:3.11-slim-bookworm
 
 # Set the working directory in the container
 WORKDIR /MoneyPrinterTurbo
@@ -19,11 +19,28 @@ ARG PIP_USE_OFFICIAL=0
 # 导致 git/ffmpeg 未安装时仍生成不可用镜像。这里把“写入软件源”“安装”
 # 和“三次重试”拆成边界清晰的 shell 函数，并用函数返回值决定是否继续。
 # 所有软件源统一使用 HTTPS，避免部分网络环境直接拦截明文 HTTP 请求。
+#
+# 2026-09：base image 已经从 bullseye 换成 bookworm。原因是 bullseye 的
+# 常规安全支持已经结束，deb.debian.org 官方源和所有第三方镜像的
+# bullseye-security 索引都仍然引用一批已经从软件池里物理删除的具体包
+# 版本（实测确认：Packages 索引写着 perl-base 5.32.1-4+deb11u5，但软件池
+# 里只剩 bookworm 的 5.36.0-7+deb12u2），导致 apt-get install 阶段对这些
+# 包稳定返回 404——这不是网络或地区问题，也不会随时间自行恢复。
+# bookworm 是当前的稳定版，同样的问题以后也会发生在它身上，所以下面的
+# 回退链保留了 archive.debian.org 这一级：等 bookworm 未来结束支持、
+# 官方把它归档后，只需要把 write_debian_sources 里的发行代号从 bookworm
+# 换成届时的旧版代号即可复用整条回退逻辑。archive.debian.org 上的
+# Release 文件 Valid-Until 早已过期，因此必须关闭该项校验（见下面
+# Acquire::Check-Valid-Until 配置），否则 apt-get update 会直接拒绝该源。
+# 注意：Dockerfile 的反斜杠续行会把下面整段 RUN 命令拼成给 shell 执行的
+# 单行文本，所以命令内部不能使用 # 注释——一旦出现就会把它之后的所有内容
+# 都吞掉。相关说明只能写在 RUN 指令之外，就是这里。
 RUN set -u; \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until; \
     write_debian_sources() { \
         main_url="$1"; \
         security_url="$2"; \
-        printf 'deb %s bullseye main\ndeb %s bullseye-updates main\ndeb %s bullseye-security main\n' \
+        printf 'deb %s bookworm main\ndeb %s bookworm-updates main\ndeb %s bookworm-security main\n' \
             "$main_url" "$main_url" "$security_url" > /etc/apt/sources.list; \
         rm -rf /var/lib/apt/lists/*; \
     }; \
@@ -62,8 +79,14 @@ RUN set -u; \
                     "https://deb.debian.org/debian" \
                     "https://deb.debian.org/debian-security"; \
                 if ! install_system_dependencies; then \
-                    echo "Failed to install system dependencies from all configured mirrors" >&2; \
-                    exit 1; \
+                    echo "Default Debian mirror failed, switching to archive.debian.org" >&2; \
+                    write_debian_sources \
+                        "https://archive.debian.org/debian" \
+                        "https://archive.debian.org/debian-security"; \
+                    if ! install_system_dependencies; then \
+                        echo "Failed to install system dependencies from all configured mirrors" >&2; \
+                        exit 1; \
+                    fi; \
                 fi; \
             fi; \
         fi; \
@@ -73,8 +96,14 @@ RUN set -u; \
             "https://deb.debian.org/debian" \
             "https://deb.debian.org/debian-security"; \
         if ! retry_system_dependencies; then \
-            echo "Failed to install system dependencies from the default Debian mirror" >&2; \
-            exit 1; \
+            echo "Default Debian mirror failed, switching to archive.debian.org" >&2; \
+            write_debian_sources \
+                "https://archive.debian.org/debian" \
+                "https://archive.debian.org/debian-security"; \
+            if ! install_system_dependencies; then \
+                echo "Failed to install system dependencies from all configured mirrors" >&2; \
+                exit 1; \
+            fi; \
         fi; \
     fi; \
     rm -rf /var/lib/apt/lists/*
