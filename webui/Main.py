@@ -57,6 +57,7 @@ from app.services import (
     webui_task,
 )
 from app.services import elevenlabs_music as elevenlabs_music_service
+from app.services import jamendo as jamendo_service
 from app.services import sonilo as sonilo_service
 from app.services import state as sm
 from app.services import task as tm
@@ -65,16 +66,16 @@ from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
 
 st.set_page_config(
-    page_title="MoneyPrinterTurbo",
+    page_title="ReelForge",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="auto",
     menu_items={
         "Report a bug": "https://github.com/harry0703/MoneyPrinterTurbo/issues",
-        "About": "# MoneyPrinterTurbo\nSimply provide a topic or keyword for a video, and it will "
+        "About": "# ReelForge\nSimply provide a topic or keyword for a video, and it will "
         "automatically generate the video copy, video materials, video subtitles, "
         "and video background music before synthesizing a high-definition short "
-        "video.\n\nhttps://github.com/harry0703/MoneyPrinterTurbo",
+        "video.\n\nBuilt on MoneyPrinterTurbo: https://github.com/harry0703/MoneyPrinterTurbo",
     },
 )
 
@@ -123,7 +124,7 @@ VIDEO_SOURCE_GROUPS = {
         "wavespeed",
     ),
     "ai_image": ("openai_image",),
-    "local": ("local",),
+    "local": ("product_media", "local"),
 }
 # Upload-Post 的 API Key 与发布用户分别在两个页面管理，并且发布用户名称
 # 不等于登录邮箱。集中维护入口可以避免多语言文案各自硬编码 URL 后发生偏差，
@@ -667,6 +668,8 @@ def _initialize_session_state():
             "loomloom_script_duration_seconds", 60, 10, 600, int
         ),
         "ui_language": initial_ui_language,
+        "ui_theme": config.ui.get("theme", "") or "light",
+        "show_advanced_settings": bool(config.ui.get("show_advanced_settings", False)),
         # 已落盘的本地素材允许用户只修改文案后继续复用。
         "local_video_materials": [],
         # 生成按钮回调先登记任务，使顶部入口能立即显示运行中数量。
@@ -819,7 +822,7 @@ def _get_unmet_restore_upload_requirements(
 
     if (
         requirements.get("local_materials")
-        and video_source == "local"
+        and video_source in ("local", "product_media")
         and not has_local_materials
     ):
         unmet.add("local_materials")
@@ -1507,7 +1510,26 @@ def _apply_restored_params(params):
     _set_stable_widget_value("voice_volume_select", params.get("voice_volume", 1.0))
     _set_stable_widget_value("voice_rate_select", params.get("voice_rate", 1.0))
     bgm_type = params.get("bgm_type") or ""
-    _set_stable_widget_value("bgm_type_select", bgm_type)
+    # 背景音乐来源现在分散在"本地"和"在线"两个标签页的独立下拉框里，
+    # 两者共用 session_state["bgm_type"] 这个canonical 值判断当前生效的
+    # 来源（见 _render_background_music_settings）。这里直接写入该值，
+    # 并清空两个下拉框各自的"上一次选择"缓存，避免会话中残留的旧对比值
+    # 挡住本次恢复；同时仍然预置两个 widget 各自的展示值，保持视觉一致。
+    st.session_state["bgm_type"] = bgm_type
+    st.session_state.pop("_bgm_local_choice_prev", None)
+    st.session_state.pop("_bgm_online_ai_choice_prev", None)
+    _set_stable_widget_value(
+        "bgm_local_type_select",
+        bgm_type if bgm_type in {"", "random", "preset", "custom"} else "random",
+    )
+    _set_stable_widget_value(
+        "bgm_online_ai_type_select",
+        bgm_type if bgm_type in {"sonilo", "elevenlabs"} else "",
+    )
+    if bgm_type == "jamendo" and params.get("bgm_file"):
+        # Jamendo 曲目走已下载文件路径，不经过某个下拉框的业务值，
+        # 因此直接写回它读取的配置项，而不是某个 widget key。
+        _set_runtime_config("ui", "jamendo_bgm_file", params["bgm_file"])
     _set_stable_widget_value("bgm_volume_select", params.get("bgm_volume", 0.2))
     if bgm_type == "preset" and params.get("bgm_file"):
         # 预设歌曲控件使用文件名作为稳定业务值。历史任务可能保存绝对路径或
@@ -1628,6 +1650,52 @@ def _open_material_settings_dialog():
     _open_settings_dialog("material")
 
 
+def _toggle_ui_theme():
+    """在浅色/深色主题之间切换，并写入配置以便下次启动保留选择。"""
+    new_theme = "dark" if st.session_state.get("ui_theme", "light") == "light" else "light"
+    st.session_state["ui_theme"] = new_theme
+    _set_runtime_config("ui", "theme", new_theme)
+    _save_runtime_config()
+
+
+def _is_advanced_mode() -> bool:
+    """供各渲染函数判断当前是否展示高级选项。"""
+    return bool(st.session_state.get("show_advanced_settings", False))
+
+
+def _render_advanced_settings_toggle():
+    """
+    在主设置区上方渲染唯一的"基础 / 高级"总开关。
+
+    只用这一个开关控制全站的复杂度：付费/小众供应商、精细调参控件平时
+    直接不渲染（而不是分别包一层 st.expander），减少组件数量和状态管理。
+    开关的 key 本身就是业务状态（与 match_materials_to_script 等控件同一
+    约定），不额外维护一份镜像变量，避免两者失步。被隐藏的选择不会丢失，
+    底层参数仍然读取上次保存的值。
+    """
+    with st.container(key="advanced_mode_toggle_row"):
+        is_advanced = st.toggle(
+            tr("Advanced Mode"),
+            key="show_advanced_settings",
+            help=tr("Advanced Mode Help"),
+        )
+        _set_runtime_config("ui", "show_advanced_settings", is_advanced)
+
+
+def _render_theme_attribute():
+    """把当前主题写入 <html data-theme=...>，供 styles.css 的显式主题规则读取。
+
+    Streamlit 默认只跟随系统的浅色/深色偏好（prefers-color-scheme）。这里额外
+    设置一个属性，让用户主动切换的选择能覆盖系统偏好，且每次整页 rerun 都会
+    重新执行，因此始终反映最新的 session_state 选择。
+    """
+    theme = html.escape(st.session_state.get("ui_theme", "light"))
+    st.markdown(
+        f"<script>document.documentElement.setAttribute('data-theme', '{theme}');</script>",
+        unsafe_allow_html=True,
+    )
+
+
 def _render_brand(available_update: str | None = None):
     """渲染项目名称、当前版本和可选的更新入口。"""
     update_link = ""
@@ -1647,7 +1715,7 @@ def _render_brand(available_update: str | None = None):
     st.markdown(
         f"""
         <h1 class="mpt-brand">
-            <span class="mpt-brand__name">MoneyPrinterTurbo</span>
+            <span class="mpt-brand__name">ReelForge</span>
             <a class="mpt-brand__version"
                href="https://github.com/harry0703/MoneyPrinterTurbo"
                target="_blank"
@@ -1674,6 +1742,7 @@ def _render_pending_version_check():
 
 def _render_top_bar():
     """渲染品牌、任务管理、设置和语言切换组成的页面顶部栏。"""
+    _render_theme_attribute()
     # 顶部栏分为品牌区和操作区两个独立区域。窄屏下由 Streamlit
     # 将两个区域整体换行，操作区内部再根据剩余宽度自动换行。
     with st.container(key="top_bar"):
@@ -1700,6 +1769,18 @@ def _render_top_bar():
             width="stretch",
         ):
             _render_task_manager_entry()
+
+            current_theme = st.session_state.get("ui_theme", "light")
+            st.button(
+                tr("Dark Mode") if current_theme == "light" else tr("Light Mode"),
+                key="toggle_ui_theme_button",
+                type="secondary",
+                icon=":material/dark_mode:"
+                if current_theme == "light"
+                else ":material/light_mode:",
+                width="content",
+                on_click=_toggle_ui_theme,
+            )
 
             st.button(
                 tr("Settings"),
@@ -4967,19 +5048,25 @@ def _render_video_settings(panel, params):
                 "metaso_minimax": tr("Metaso MiniMax H3"),
                 "loomloom": tr("Shengsuan Cloud AI Video"),
                 "openai_image": tr("OpenAI Compatible Text-to-Image"),
+                "product_media": tr("Product Photo/Video"),
                 "local": tr("Local file"),
             }
             saved_video_source_name = str(
                 config.app.get("video_source", "pexels") or "pexels"
             )
+            advanced_mode = _is_advanced_mode()
+            # 基础模式只展示免费/本地素材来源，减少下拉框里的付费供应商噪音。
+            # 如果用户切到基础模式前已经选了某个 AI 供应商，仍把该分组带上，
+            # 避免静默把已保存的选择重置成 pexels（隐藏不等于丢弃配置）。
+            video_source_groups = [(tr("Stock Video"), VIDEO_SOURCE_GROUPS["stock_video"])]
+            if advanced_mode or saved_video_source_name in VIDEO_SOURCE_GROUPS["ai_video"]:
+                video_source_groups.append((tr("AI Video"), VIDEO_SOURCE_GROUPS["ai_video"]))
+            if advanced_mode or saved_video_source_name in VIDEO_SOURCE_GROUPS["ai_image"]:
+                video_source_groups.append((tr("AI Image"), VIDEO_SOURCE_GROUPS["ai_image"]))
+            video_source_groups.append((tr("Local Material"), VIDEO_SOURCE_GROUPS["local"]))
             params.video_source = grouped_selectbox(
                 tr("Video Source"),
-                groups=(
-                    (tr("Stock Video"), VIDEO_SOURCE_GROUPS["stock_video"]),
-                    (tr("AI Video"), VIDEO_SOURCE_GROUPS["ai_video"]),
-                    (tr("AI Image"), VIDEO_SOURCE_GROUPS["ai_image"]),
-                    (tr("Local Material"), VIDEO_SOURCE_GROUPS["local"]),
-                ),
+                groups=tuple(video_source_groups),
                 default_value=saved_video_source_name,
                 key="video_source_select",
                 format_func=video_source_labels.get,
@@ -5004,92 +5091,132 @@ def _render_video_settings(panel, params):
                 st.caption(f"[OfoxAI]({OFOX_REFERRAL_URL}) · {tr('OFox AI Video Help')}")
             if params.video_source == "metaso_minimax":
                 st.caption(tr("Metaso MiniMax H3 Help"))
-            if params.video_source == "local":
+            if params.video_source in ("local", "product_media"):
                 # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
                 local_file_types = sorted(
                     extension.removeprefix(".")
                     for extension in LOCAL_MATERIAL_EXTENSIONS
                 )
-                uploaded_files = st.file_uploader(
-                    tr("Upload Local Files"),
-                    type=local_file_types
-                    + [file_type.upper() for file_type in local_file_types],
-                    accept_multiple_files=True,
-                    key="local_video_materials_uploader",
+                file_type_options = local_file_types + [
+                    file_type.upper() for file_type in local_file_types
+                ]
+                if params.video_source == "product_media":
+                    st.caption(tr("Product Media Help"))
+                    uploaded_files = st.file_uploader(
+                        tr("Upload Product Photo/Video"),
+                        type=file_type_options,
+                        accept_multiple_files=True,
+                        key="product_media_uploader",
+                    )
+                else:
+                    uploaded_files = st.file_uploader(
+                        tr("Upload Local Files"),
+                        type=file_type_options,
+                        accept_multiple_files=True,
+                        key="local_video_materials_uploader",
+                    )
+
+            if advanced_mode:
+                # 文案顺序匹配会从关键词生成到最终合成全程保持叙事顺序，因此开启时
+                # 顺序拼接是唯一符合实际执行逻辑的选项。同步控件值可避免界面仍显示
+                # “随机拼接”，同时保留用户原选择，关闭后自动恢复。
+                sync_script_order_concat_mode()
+                selected_concat_mode = stable_selectbox(
+                    tr("Video Concat Mode"),
+                    options=[value for _, value in video_concat_modes],
+                    default_value=_saved_ui_choice(
+                        "video_concat_mode",
+                        [value for _, value in video_concat_modes],
+                        VideoConcatMode.random.value,
+                    ),
+                    key="video_concat_mode_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in video_concat_modes
+                    )[value],
+                    disabled=bool(
+                        st.session_state.get("match_materials_to_script", False)
+                    ),
                 )
+                params.video_concat_mode = VideoConcatMode(selected_concat_mode)
 
-            # 文案顺序匹配会从关键词生成到最终合成全程保持叙事顺序，因此开启时
-            # 顺序拼接是唯一符合实际执行逻辑的选项。同步控件值可避免界面仍显示
-            # “随机拼接”，同时保留用户原选择，关闭后自动恢复。
-            sync_script_order_concat_mode()
-            selected_concat_mode = stable_selectbox(
-                tr("Video Concat Mode"),
-                options=[value for _, value in video_concat_modes],
-                default_value=_saved_ui_choice(
-                    "video_concat_mode",
-                    [value for _, value in video_concat_modes],
-                    VideoConcatMode.random.value,
-                ),
-                key="video_concat_mode_select",
-                format_func=lambda value: dict(
-                    (v, label) for label, v in video_concat_modes
-                )[value],
-                disabled=bool(st.session_state.get("match_materials_to_script", False)),
-            )
-            params.video_concat_mode = VideoConcatMode(selected_concat_mode)
-
-            params.match_materials_to_script = st.checkbox(
-                tr("Match Materials to Script Order"),
-                help=tr("Match Materials to Script Order Help"),
-                key="match_materials_to_script",
-                on_change=sync_script_order_concat_mode,
-            )
-            _set_runtime_config(
-                "app",
-                "match_materials_to_script",
-                params.match_materials_to_script,
-            )
-            # 顺序匹配开启时，sequential 是派生出的强制值，不应覆盖用户在关闭
-            # 该功能时选择的拼接偏好；关闭后仍能恢复此前的 random/sequential。
-            if not params.match_materials_to_script:
+                params.match_materials_to_script = st.checkbox(
+                    tr("Match Materials to Script Order"),
+                    help=tr("Match Materials to Script Order Help"),
+                    key="match_materials_to_script",
+                    on_change=sync_script_order_concat_mode,
+                )
                 _set_runtime_config(
-                    "ui", "video_concat_mode", params.video_concat_mode.value
+                    "app",
+                    "match_materials_to_script",
+                    params.match_materials_to_script,
                 )
+                # 顺序匹配开启时，sequential 是派生出的强制值，不应覆盖用户在关闭
+                # 该功能时选择的拼接偏好；关闭后仍能恢复此前的 random/sequential。
+                if not params.match_materials_to_script:
+                    _set_runtime_config(
+                        "ui", "video_concat_mode", params.video_concat_mode.value
+                    )
 
-            # 视频转场模式
-            video_transition_modes = [
-                (tr("None"), VideoTransitionMode.none.value),
-                (tr("Shuffle"), VideoTransitionMode.shuffle.value),
-                (tr("FadeIn"), VideoTransitionMode.fade_in.value),
-                (tr("FadeOut"), VideoTransitionMode.fade_out.value),
-                (tr("SlideIn"), VideoTransitionMode.slide_in.value),
-                (tr("SlideOut"), VideoTransitionMode.slide_out.value),
-                (tr("ZoomIn"), VideoTransitionMode.zoom_in.value),
-                (tr("ZoomOut"), VideoTransitionMode.zoom_out.value),
-            ]
-            selected_transition_mode = stable_selectbox(
-                tr("Video Transition Mode"),
-                options=[value for _, value in video_transition_modes],
-                default_value=_saved_ui_choice(
+                # 视频转场模式
+                video_transition_modes = [
+                    (tr("None"), VideoTransitionMode.none.value),
+                    (tr("Shuffle"), VideoTransitionMode.shuffle.value),
+                    (tr("FadeIn"), VideoTransitionMode.fade_in.value),
+                    (tr("FadeOut"), VideoTransitionMode.fade_out.value),
+                    (tr("SlideIn"), VideoTransitionMode.slide_in.value),
+                    (tr("SlideOut"), VideoTransitionMode.slide_out.value),
+                    (tr("ZoomIn"), VideoTransitionMode.zoom_in.value),
+                    (tr("ZoomOut"), VideoTransitionMode.zoom_out.value),
+                ]
+                selected_transition_mode = stable_selectbox(
+                    tr("Video Transition Mode"),
+                    options=[value for _, value in video_transition_modes],
+                    default_value=_saved_ui_choice(
+                        "video_transition_mode",
+                        [value for _, value in video_transition_modes],
+                        VideoTransitionMode.none.value,
+                    ),
+                    key="video_transition_mode_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in video_transition_modes
+                    )[value],
+                )
+                params.video_transition_mode = VideoTransitionMode(
+                    selected_transition_mode
+                )
+                _set_runtime_config(
+                    "ui",
                     "video_transition_mode",
-                    [value for _, value in video_transition_modes],
-                    VideoTransitionMode.none.value,
-                ),
-                key="video_transition_mode_select",
-                format_func=lambda value: dict(
-                    (v, label) for label, v in video_transition_modes
-                )[value],
-            )
-            params.video_transition_mode = VideoTransitionMode(selected_transition_mode)
-            _set_runtime_config(
-                "ui",
-                "video_transition_mode",
-                params.video_transition_mode.value,
-            )
+                    params.video_transition_mode.value,
+                )
+            else:
+                # 基础模式不渲染这些精细调参控件，但仍按上次保存的配置取值，
+                # 避免用户在高级模式下做过的选择被静默重置。
+                params.match_materials_to_script = bool(
+                    config.app.get("match_materials_to_script", False)
+                )
+                if params.match_materials_to_script:
+                    params.video_concat_mode = VideoConcatMode.sequential
+                else:
+                    params.video_concat_mode = VideoConcatMode(
+                        _saved_ui_choice(
+                            "video_concat_mode",
+                            [value for _, value in video_concat_modes],
+                            VideoConcatMode.random.value,
+                        )
+                    )
+                params.video_transition_mode = VideoTransitionMode(
+                    _saved_ui_choice(
+                        "video_transition_mode",
+                        [mode.value for mode in VideoTransitionMode],
+                        VideoTransitionMode.none.value,
+                    )
+                )
 
             video_aspect_ratios = [
                 (tr("Portrait"), VideoAspect.portrait.value),
                 (tr("Landscape"), VideoAspect.landscape.value),
+                (tr("Square"), VideoAspect.square.value),
             ]
             if loomloom_video_capability is not None:
                 ratio_labels = {value: label for label, value in video_aspect_ratios}
@@ -5124,28 +5251,109 @@ def _render_video_settings(panel, params):
                 "ui", video_aspect_config_key, params.video_aspect.value
             )
 
-            video_fit_modes = [
-                (tr("Fill and Crop"), VideoFitMode.cover.value),
-                (tr("Fit with Black Bars"), VideoFitMode.contain.value),
+            video_quality_options = [
+                (tr("High Quality"), "high"),
+                (tr("Medium Quality"), "medium"),
+                (tr("Low Quality (Smaller File)"), "low"),
             ]
-            selected_fit_mode = stable_selectbox(
-                tr("Video Fit Mode"),
-                options=[value for _, value in video_fit_modes],
+            params.output_quality = stable_selectbox(
+                tr("Output Video Quality"),
+                options=[value for _, value in video_quality_options],
                 default_value=_saved_ui_choice(
-                    "video_fit_mode",
-                    [value for _, value in video_fit_modes],
-                    VideoFitMode.cover.value,
+                    "output_quality",
+                    [value for _, value in video_quality_options],
+                    "high",
                 ),
-                key="video_fit_mode_select",
+                key="output_quality_select",
                 format_func=lambda value: dict(
-                    (v, label) for label, v in video_fit_modes
+                    (v, label) for label, v in video_quality_options
                 )[value],
-                help=tr("Video Fit Mode Help"),
+                help=tr("Output Video Quality Help"),
             )
-            params.video_fit_mode = VideoFitMode(selected_fit_mode)
-            _set_runtime_config(
-                "ui", "video_fit_mode", params.video_fit_mode.value
+            _set_runtime_config("ui", "output_quality", params.output_quality)
+
+            # 0 表示不限制，避免额外加一个开关控制是否启用体积上限。
+            max_output_size_input = st.number_input(
+                tr("Max Output File Size (MB)"),
+                min_value=0.0,
+                step=10.0,
+                value=_saved_ui_number("max_output_size_mb", 0.0, 0.0, 10_000.0),
+                key="max_output_size_mb_input",
+                help=tr("Max Output File Size Help"),
             )
+            params.max_output_size_mb = (
+                max_output_size_input if max_output_size_input > 0 else None
+            )
+            _set_runtime_config("ui", "max_output_size_mb", max_output_size_input)
+
+            with st.expander(tr("Custom Watermark"), expanded=False):
+                st.session_state.setdefault(
+                    "watermark_enabled_checkbox",
+                    _saved_ui_bool("watermark_enabled", False),
+                )
+                params.watermark_enabled = st.checkbox(
+                    tr("Enable Watermark"),
+                    key="watermark_enabled_checkbox",
+                    help=tr("Enable Watermark Help"),
+                )
+                _set_runtime_config(
+                    "ui", "watermark_enabled", params.watermark_enabled
+                )
+
+                st.session_state.setdefault(
+                    "watermark_text_input", _saved_ui_text("watermark_text")
+                )
+                params.watermark_text = st.text_input(
+                    tr("Watermark Text"),
+                    key="watermark_text_input",
+                    max_chars=60,
+                    disabled=not params.watermark_enabled,
+                ).strip()
+                _set_runtime_config("ui", "watermark_text", params.watermark_text)
+
+                watermark_position_options = [
+                    (tr("Small Corner Throughout"), "corner_persistent"),
+                    (tr("Intro/Outro Only"), "intro_outro"),
+                ]
+                params.watermark_position = stable_selectbox(
+                    tr("Watermark Timing"),
+                    options=[v for _, v in watermark_position_options],
+                    default_value=_saved_ui_choice(
+                        "watermark_position",
+                        [v for _, v in watermark_position_options],
+                        "corner_persistent",
+                    ),
+                    key="watermark_position_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in watermark_position_options
+                    )[value],
+                    disabled=not params.watermark_enabled,
+                )
+                _set_runtime_config(
+                    "ui", "watermark_position", params.watermark_position
+                )
+
+                watermark_corner_options = [
+                    (tr("Top Left"), "top_left"),
+                    (tr("Top Right"), "top_right"),
+                    (tr("Bottom Left"), "bottom_left"),
+                    (tr("Bottom Right"), "bottom_right"),
+                ]
+                params.watermark_corner = stable_selectbox(
+                    tr("Watermark Corner"),
+                    options=[v for _, v in watermark_corner_options],
+                    default_value=_saved_ui_choice(
+                        "watermark_corner",
+                        [v for _, v in watermark_corner_options],
+                        "bottom_right",
+                    ),
+                    key="watermark_corner_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in watermark_corner_options
+                    )[value],
+                    disabled=not params.watermark_enabled,
+                )
+                _set_runtime_config("ui", "watermark_corner", params.watermark_corner)
 
             # MiniMax H3 的远端时长范围是 4～15 秒。选择秘塔时使用完整能力
             # 范围，既避免 2/3 秒被按 4 秒计费，也让 WebUI 与 CLI、服务层一致。
@@ -5159,83 +5367,129 @@ def _render_video_settings(panel, params):
                 if params.video_source == "metaso_minimax"
                 else [2, 3, 4, 5, 6, 7, 8, 9, 10]
             )
-            params.video_clip_duration = stable_selectbox(
-                tr("Clip Duration"),
-                options=video_clip_durations,
-                default_value=_saved_ui_choice(
-                    "video_clip_duration",
-                    video_clip_durations,
-                    5 if params.video_source == "metaso_minimax" else 3,
-                ),
-                key="video_clip_duration_select",
-                help=tr("Clip Duration Help"),
-            )
-            _set_runtime_config(
-                "ui", "video_clip_duration", params.video_clip_duration
-            )
-            clip_speed_key = localized_widget_key("video_clip_speed_slider")
-            # session_state 可能来自旧任务、API 参数或旧版页面状态。控件创建前
-            # 统一归一化，既保留合法选择，也确保 slider 始终收到 0.5～2.0
-            # 范围内的有限浮点数。
-            st.session_state[clip_speed_key] = utils.normalize_clip_speed(
-                st.session_state.get(
-                    clip_speed_key,
-                    _saved_ui_number("video_clip_speed", 1.0, 0.5, 2.0),
-                )
-            )
-            params.video_clip_speed = st.slider(
-                tr("Clip Speed"),
-                min_value=0.5,
-                max_value=2.0,
-                step=0.05,
-                format="%.2fx",
-                key=clip_speed_key,
-                help=tr("Clip Speed Help"),
-            )
-            _set_runtime_config("ui", "video_clip_speed", params.video_clip_speed)
-            video_count_options = [1, 2, 3, 4, 5]
-            params.video_count = stable_selectbox(
-                tr("Number of Videos Generated Simultaneously"),
-                options=video_count_options,
-                default_value=_saved_ui_choice(
-                    "video_count", video_count_options, 1
-                ),
-                key="video_count_select",
-            )
-            _set_runtime_config("ui", "video_count", params.video_count)
+            default_clip_duration = 5 if params.video_source == "metaso_minimax" else 3
 
-            video_codec_options = [
-                (tr("Default Video Encoder"), DEFAULT_VIDEO_CODEC_OPTION),
-                ("libx264 (CPU)", "libx264"),
-                ("NVIDIA NVENC (h264_nvenc)", "h264_nvenc"),
-                ("AMD AMF (h264_amf)", "h264_amf"),
-                ("Intel QSV (h264_qsv)", "h264_qsv"),
-                ("Windows MediaFoundation (h264_mf)", "h264_mf"),
-                ("macOS VideoToolbox (h264_videotoolbox)", "h264_videotoolbox"),
-            ]
-            saved_video_codec = config.app.get(
-                "video_codec", DEFAULT_VIDEO_CODEC_OPTION
-            )
-            saved_video_codec_values = [item[1] for item in video_codec_options]
-            if saved_video_codec not in saved_video_codec_values:
-                # 旧版本或手工配置可能留下无效值。UI 回到“默认”而不是替用户
-                # 固定某个编码器，后端仍会按稳定策略解析为 libx264。
-                saved_video_codec = DEFAULT_VIDEO_CODEC_OPTION
-            selected_video_codec = stable_selectbox(
-                tr("Video Encoder"),
-                options=saved_video_codec_values,
-                default_value=saved_video_codec,
-                key="video_encoder_select",
-                format_func=lambda value: dict(
-                    (v, label) for label, v in video_codec_options
-                )[value],
-                help=tr("Video Encoder Help"),
-            )
-            if selected_video_codec == DEFAULT_VIDEO_CODEC_OPTION:
-                # 默认模式不持久化具体编码器，让配置表达“跟随项目默认值”。
-                _delete_runtime_config("app", "video_codec")
+            if advanced_mode:
+                video_fit_modes = [
+                    (tr("Fill and Crop"), VideoFitMode.cover.value),
+                    (tr("Fit with Black Bars"), VideoFitMode.contain.value),
+                ]
+                selected_fit_mode = stable_selectbox(
+                    tr("Video Fit Mode"),
+                    options=[value for _, value in video_fit_modes],
+                    default_value=_saved_ui_choice(
+                        "video_fit_mode",
+                        [value for _, value in video_fit_modes],
+                        VideoFitMode.cover.value,
+                    ),
+                    key="video_fit_mode_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in video_fit_modes
+                    )[value],
+                    help=tr("Video Fit Mode Help"),
+                )
+                params.video_fit_mode = VideoFitMode(selected_fit_mode)
+                _set_runtime_config(
+                    "ui", "video_fit_mode", params.video_fit_mode.value
+                )
+
+                params.video_clip_duration = stable_selectbox(
+                    tr("Clip Duration"),
+                    options=video_clip_durations,
+                    default_value=_saved_ui_choice(
+                        "video_clip_duration",
+                        video_clip_durations,
+                        default_clip_duration,
+                    ),
+                    key="video_clip_duration_select",
+                    help=tr("Clip Duration Help"),
+                )
+                _set_runtime_config(
+                    "ui", "video_clip_duration", params.video_clip_duration
+                )
+                clip_speed_key = localized_widget_key("video_clip_speed_slider")
+                # session_state 可能来自旧任务、API 参数或旧版页面状态。控件创建前
+                # 统一归一化，既保留合法选择，也确保 slider 始终收到 0.5～2.0
+                # 范围内的有限浮点数。
+                st.session_state[clip_speed_key] = utils.normalize_clip_speed(
+                    st.session_state.get(
+                        clip_speed_key,
+                        _saved_ui_number("video_clip_speed", 1.0, 0.5, 2.0),
+                    )
+                )
+                params.video_clip_speed = st.slider(
+                    tr("Clip Speed"),
+                    min_value=0.5,
+                    max_value=2.0,
+                    step=0.05,
+                    format="%.2fx",
+                    key=clip_speed_key,
+                    help=tr("Clip Speed Help"),
+                )
+                _set_runtime_config("ui", "video_clip_speed", params.video_clip_speed)
+                video_count_options = [1, 2, 3, 4, 5]
+                params.video_count = stable_selectbox(
+                    tr("Number of Videos Generated Simultaneously"),
+                    options=video_count_options,
+                    default_value=_saved_ui_choice(
+                        "video_count", video_count_options, 1
+                    ),
+                    key="video_count_select",
+                )
+                _set_runtime_config("ui", "video_count", params.video_count)
+
+                video_codec_options = [
+                    (tr("Default Video Encoder"), DEFAULT_VIDEO_CODEC_OPTION),
+                    ("libx264 (CPU)", "libx264"),
+                    ("NVIDIA NVENC (h264_nvenc)", "h264_nvenc"),
+                    ("AMD AMF (h264_amf)", "h264_amf"),
+                    ("Intel QSV (h264_qsv)", "h264_qsv"),
+                    ("Windows MediaFoundation (h264_mf)", "h264_mf"),
+                    ("macOS VideoToolbox (h264_videotoolbox)", "h264_videotoolbox"),
+                ]
+                saved_video_codec = config.app.get(
+                    "video_codec", DEFAULT_VIDEO_CODEC_OPTION
+                )
+                saved_video_codec_values = [item[1] for item in video_codec_options]
+                if saved_video_codec not in saved_video_codec_values:
+                    # 旧版本或手工配置可能留下无效值。UI 回到“默认”而不是替用户
+                    # 固定某个编码器，后端仍会按稳定策略解析为 libx264。
+                    saved_video_codec = DEFAULT_VIDEO_CODEC_OPTION
+                selected_video_codec = stable_selectbox(
+                    tr("Video Encoder"),
+                    options=saved_video_codec_values,
+                    default_value=saved_video_codec,
+                    key="video_encoder_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in video_codec_options
+                    )[value],
+                    help=tr("Video Encoder Help"),
+                )
+                if selected_video_codec == DEFAULT_VIDEO_CODEC_OPTION:
+                    # 默认模式不持久化具体编码器，让配置表达“跟随项目默认值”。
+                    _delete_runtime_config("app", "video_codec")
+                else:
+                    _set_runtime_config("app", "video_codec", selected_video_codec)
             else:
-                _set_runtime_config("app", "video_codec", selected_video_codec)
+                # 基础模式不渲染这些精细调参控件，直接沿用上次保存的配置值。
+                # 视频编码器不挂在 params 上、只落在 config.app，不渲染控件时
+                # 无需在这里处理，后端会照常读取已保存的值。
+                params.video_fit_mode = VideoFitMode(
+                    _saved_ui_choice(
+                        "video_fit_mode",
+                        [mode.value for mode in VideoFitMode],
+                        VideoFitMode.cover.value,
+                    )
+                )
+                params.video_clip_duration = _saved_ui_choice(
+                    "video_clip_duration", video_clip_durations, default_clip_duration
+                )
+                params.video_clip_speed = utils.normalize_clip_speed(
+                    _saved_ui_number("video_clip_speed", 1.0, 0.5, 2.0)
+                )
+                params.video_count = _saved_ui_choice(
+                    "video_count", [1, 2, 3, 4, 5], 1
+                )
 
             if params.video_source == "loomloom":
                 _render_loomloom_video_settings(params)
@@ -6039,54 +6293,121 @@ def _render_elevenlabs_api_key_input(label_key):
     ).strip()
 
 
+def _render_jamendo_bgm_picker(params) -> None:
+    """
+    渲染 Jamendo 在线曲库搜索面板。
+
+    这是"选中即生效"的交互：搜索结果只做预览（直接播放 Jamendo 提供的
+    远程地址，不下载），点击"使用这首"才会真正下载并保存为背景音乐文件，
+    同时把 bgm_type 切到 "jamendo"。下载好的文件复用现有 storage/bgm 目录
+    和安全校验，后续渲染流程与"自定义背景音乐"完全一致，不需要单独处理。
+    """
+    if not jamendo_service.is_enabled():
+        st.info(tr("Jamendo API Key Required"))
+        return
+
+    default_query = str(params.video_subject or "").strip()
+    query = st.text_input(
+        tr("Jamendo Search Keywords"),
+        value=st.session_state.get("jamendo_search_query", default_query),
+        key="jamendo_search_query",
+        help=tr("Jamendo Search Help"),
+    )
+    if st.button(tr("Search Jamendo"), key="jamendo_search_button"):
+        st.session_state.pop("jamendo_search_error", None)
+        try:
+            st.session_state["jamendo_search_results"] = jamendo_service.search_tracks(
+                query
+            )
+        except jamendo_service.JamendoError as exc:
+            st.session_state["jamendo_search_results"] = []
+            st.session_state["jamendo_search_error"] = str(exc)
+
+    if st.session_state.get("jamendo_search_error"):
+        st.error(
+            tr("Jamendo Search Failed").format(
+                error=st.session_state["jamendo_search_error"]
+            )
+        )
+
+    selected_name = st.session_state.get("jamendo_selected_track_name")
+    if st.session_state.get("bgm_type") == "jamendo" and selected_name:
+        st.success(tr("Jamendo Track Selected").format(name=selected_name))
+
+    results = st.session_state.get("jamendo_search_results")
+    if results is None:
+        return
+    if not results:
+        st.caption(tr("Jamendo No Results"))
+        return
+
+    for track in results:
+        track_cols = st.columns([0.55, 0.3, 0.15])
+        with track_cols[0]:
+            license_label = (
+                tr("Royalty-Free") if track.is_royalty_free else tr("Licensed")
+            )
+            st.write(f"**{track.name}** — {track.artist_name}")
+            st.caption(license_label)
+        with track_cols[1]:
+            st.audio(track.audio_url)
+        with track_cols[2]:
+            if st.button(
+                tr("Use This Track"), key=f"jamendo_use_{track.track_id}"
+            ):
+                try:
+                    stored_name = jamendo_service.download_track_as_bgm(track)
+                except jamendo_service.JamendoError as exc:
+                    st.error(tr("Jamendo Download Failed").format(error=str(exc)))
+                else:
+                    st.session_state["bgm_type"] = "jamendo"
+                    st.session_state["jamendo_selected_track_name"] = track.name
+                    _set_runtime_config("ui", "bgm_type", "jamendo")
+                    _set_runtime_config("ui", "jamendo_bgm_file", stored_name)
+                    st.rerun()
+
+
 def _render_background_music_settings(params, elevenlabs_api_key_rendered=False):
-    """渲染背景音乐来源与音量设置，并返回本次待保存的上传文件。"""
+    """
+    渲染背景音乐来源与音量设置，并返回本次待保存的上传文件。
+
+    来源分两个标签页展示："本地"（不联网，随机/预置/自定义上传，行为与
+    升级前完全一致）和"在线推荐"（Jamendo 曲库搜索是主入口，AI 生成音乐
+    收进其中的高级折叠区）。两个标签页各自的下拉框都会持续渲染（Streamlit
+    标签页不会跳过未激活标签的代码执行），因此用一个不挂在任何单个 widget
+    上的 session_state["bgm_type"] 做唯一事实来源，只有当某个控件的返回值
+    与它自己上一次的值不同时才更新它，避免两个下拉框互相覆盖对方的选择。
+    """
     uploaded_bgm_file = None
     previous_bgm_type = st.session_state.get("last_rendered_bgm_type")
     st.divider()
-    bgm_options = [
+
+    local_bgm_options = [
         (tr("No Background Music"), ""),
         (tr("Random Background Music"), "random"),
         (tr("Preset Song"), "preset"),
         (tr("Custom Background Music"), "custom"),
+    ]
+    online_ai_bgm_options = [
+        (tr("No Background Music"), ""),
         (tr("Sonilo Background Music"), "sonilo"),
         (tr("ElevenLabs Background Music"), "elevenlabs"),
     ]
-    selected_bgm_type = stable_selectbox(
-        tr("Background Music Source"),
-        options=[value for _, value in bgm_options],
-        default_value=_saved_ui_choice(
-            "bgm_type",
-            [value for _, value in bgm_options],
-            "random",
-        ),
-        key="bgm_type_select",
-        format_func=lambda value: dict((v, label) for label, v in bgm_options)[value],
+    local_values = [value for _, value in local_bgm_options]
+    online_ai_values = [value for _, value in online_ai_bgm_options]
+    all_known_values = list(
+        dict.fromkeys(local_values + online_ai_values + ["jamendo"])
     )
-    params.bgm_type = selected_bgm_type
-    _set_runtime_config("ui", "bgm_type", params.bgm_type)
-    if params.bgm_type == "sonilo":
-        configured_key = str(config.app.get("sonilo_api_key", "") or "").strip()
-        effective_key = configured_key or os.getenv("SONILO_API_KEY", "").strip()
-        entered_key = st.text_input(
-            tr("Sonilo API Key"),
-            value=effective_key,
-            type="password",
-            key="sonilo_api_key_input",
-        ).strip()
-        # 用户要求已配置的 Key 直接回填到密码输入框。配置值优先于环境变量；
-        # 仅当用户确实修改输入或本来就使用配置时写回，避免把环境变量中的 Key
-        # 在无操作的情况下复制进 config.toml。
-        if configured_key or entered_key != effective_key:
-            _set_runtime_config("app", "sonilo_api_key", entered_key)
-    elif params.bgm_type == "elevenlabs":
-        if elevenlabs_api_key_rendered:
-            # TTS 区域已经渲染共享输入框时不再创建第二个 widget，避免两个独立
-            # session_state 值互相覆盖。说明文字帮助用户定位上方的共用配置。
-            st.caption(tr("ElevenLabs API Key Help"))
-        else:
-            _render_elevenlabs_api_key_input("ElevenLabs Music API Key")
 
+    if "bgm_type" not in st.session_state:
+        st.session_state["bgm_type"] = _saved_ui_choice(
+            "bgm_type", all_known_values, "random"
+        )
+    current_bgm_type = st.session_state["bgm_type"]
+
+    # 音量与具体来源无关，且下面两个标签页内部都要用它判断是否需要处理
+    # BGM，所以在进入标签页之前就渲染，确保 params.bgm_volume 已经是本次
+    # 渲染的真实值，而不是 VideoParams 的 schema 默认值。
     bgm_volume_options = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     params.bgm_volume = stable_selectbox(
         tr("Background Music Volume"),
@@ -6094,254 +6415,360 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
         default_value=_saved_ui_choice("bgm_volume", bgm_volume_options, 0.2),
         key="bgm_volume_select",
         format_func=lambda value: f"{int(value * 100)}%",
-        disabled=not params.bgm_type,
+        disabled=not current_bgm_type,
     )
     _set_runtime_config("ui", "bgm_volume", params.bgm_volume)
-    bgm_enabled = bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
 
-    if params.bgm_type == "custom":
-        uploaded_bgm_file = st.file_uploader(
-            tr("Upload Background Music"),
-            type=[
-                extension.removeprefix(".")
-                for extension in bgm_service.SUPPORTED_BGM_EXTENSIONS
-            ],
-            accept_multiple_files=False,
-            key="custom_bgm_uploader",
-            help=tr("Upload Background Music Help"),
-            # Streamlit 默认会在控件上展示全局 200MB 上限。这里必须与服务层
-            # 30MB 硬限制保持一致，避免界面允许选择、提交时才被服务端拒绝。
-            max_upload_size=bgm_service.MAX_BGM_UPLOAD_BYTES // (1024 * 1024),
+    local_tab, online_tab = st.tabs(
+        [tr("Local Music"), tr("Online Suggestions")]
+    )
+
+    with local_tab:
+        local_default = current_bgm_type if current_bgm_type in local_values else "random"
+        st.session_state.setdefault("_bgm_local_choice_prev", local_default)
+        local_choice = stable_selectbox(
+            tr("Background Music Source"),
+            options=local_values,
+            default_value=local_default,
+            key="bgm_local_type_select",
+            format_func=lambda value: dict(
+                (v, label) for label, v in local_bgm_options
+            )[value],
         )
-        if uploaded_bgm_file is not None and bgm_enabled:
-            try:
-                safe_name = bgm_service.sanitize_upload_filename(uploaded_bgm_file.name)
-                # Streamlit 在调整音量等任意控件后都会重新执行页面。使用内容哈希
-                # 区分上传文件，并在当前会话内缓存完整解码结果，既不能只凭同名、
-                # 同大小文件误用旧结果，也避免每次 rerun 都重复调用 FFmpeg。
-                validation_key = (
-                    safe_name,
-                    uploaded_bgm_file.size,
-                    hashlib.sha256(uploaded_bgm_file.getbuffer()).hexdigest(),
-                )
-                cached_validation = st.session_state.get("custom_bgm_validation")
-                if (
-                    not cached_validation
-                    or cached_validation.get("key") != validation_key
-                ):
-                    try:
-                        bgm_service.validate_bgm_upload(
-                            uploaded_bgm_file.name, uploaded_bgm_file
-                        )
-                    except bgm_service.BgmUploadError as exc:
-                        cached_validation = {
-                            "key": validation_key,
-                            "error": str(exc),
-                            "error_type": "upload",
-                        }
-                        # 同一个文件指纹的失败结果会进入会话缓存，因此这里只在
-                        # 首次真实执行校验时记录一次，避免普通控件 rerun 刷屏。
-                        logger.warning(
-                            "WebUI background music validation rejected: "
-                            f"name={safe_name}, error={str(exc)}"
-                        )
-                    except bgm_service.BgmServiceError as exc:
-                        cached_validation = {
-                            "key": validation_key,
-                            "error": str(exc),
-                            "error_type": "service",
-                        }
-                        logger.error(
-                            "WebUI background music validation failed: "
-                            f"name={safe_name}, error={str(exc)}"
-                        )
-                    else:
-                        cached_validation = {
-                            "key": validation_key,
-                            "error": "",
-                            "error_type": "",
-                        }
-                    st.session_state["custom_bgm_validation"] = cached_validation
+        if local_choice != st.session_state["_bgm_local_choice_prev"]:
+            st.session_state["_bgm_local_choice_prev"] = local_choice
+            st.session_state["bgm_type"] = local_choice
+            current_bgm_type = local_choice
 
-                if cached_validation.get("error"):
-                    if cached_validation.get("error_type") == "service":
-                        raise bgm_service.BgmServiceError(cached_validation["error"])
-                    raise bgm_service.BgmUploadError(cached_validation["error"])
-            except bgm_service.BgmUploadError:
-                # 非法文件不能沿用上一次有效上传的名称，否则任务参数可能仍指向
-                # 历史 BGM。保留 UploadedFile 返回值，让用户点击生成时仍会被最终
-                # 服务端校验拦截，而不是静默生成一条没有背景音乐的视频。
+        if current_bgm_type == "custom":
+            uploaded_bgm_file = st.file_uploader(
+                tr("Upload Background Music"),
+                type=[
+                    extension.removeprefix(".")
+                    for extension in bgm_service.SUPPORTED_BGM_EXTENSIONS
+                ],
+                accept_multiple_files=False,
+                key="custom_bgm_uploader",
+                help=tr("Upload Background Music Help"),
+                # Streamlit 默认会在控件上展示全局 200MB 上限。这里必须与服务层
+                # 30MB 硬限制保持一致，避免界面允许选择、提交时才被服务端拒绝。
+                max_upload_size=bgm_service.MAX_BGM_UPLOAD_BYTES // (1024 * 1024),
+            )
+            bgm_enabled_preview = bgm_service.should_use_bgm(
+                current_bgm_type, params.bgm_volume
+            )
+            if uploaded_bgm_file is not None and bgm_enabled_preview:
+                try:
+                    safe_name = bgm_service.sanitize_upload_filename(
+                        uploaded_bgm_file.name
+                    )
+                    # Streamlit 在调整音量等任意控件后都会重新执行页面。使用内容哈希
+                    # 区分上传文件，并在当前会话内缓存完整解码结果，既不能只凭同名、
+                    # 同大小文件误用旧结果，也避免每次 rerun 都重复调用 FFmpeg。
+                    validation_key = (
+                        safe_name,
+                        uploaded_bgm_file.size,
+                        hashlib.sha256(uploaded_bgm_file.getbuffer()).hexdigest(),
+                    )
+                    cached_validation = st.session_state.get("custom_bgm_validation")
+                    if (
+                        not cached_validation
+                        or cached_validation.get("key") != validation_key
+                    ):
+                        try:
+                            bgm_service.validate_bgm_upload(
+                                uploaded_bgm_file.name, uploaded_bgm_file
+                            )
+                        except bgm_service.BgmUploadError as exc:
+                            cached_validation = {
+                                "key": validation_key,
+                                "error": str(exc),
+                                "error_type": "upload",
+                            }
+                            # 同一个文件指纹的失败结果会进入会话缓存，因此这里只在
+                            # 首次真实执行校验时记录一次，避免普通控件 rerun 刷屏。
+                            logger.warning(
+                                "WebUI background music validation rejected: "
+                                f"name={safe_name}, error={str(exc)}"
+                            )
+                        except bgm_service.BgmServiceError as exc:
+                            cached_validation = {
+                                "key": validation_key,
+                                "error": str(exc),
+                                "error_type": "service",
+                            }
+                            logger.error(
+                                "WebUI background music validation failed: "
+                                f"name={safe_name}, error={str(exc)}"
+                            )
+                        else:
+                            cached_validation = {
+                                "key": validation_key,
+                                "error": "",
+                                "error_type": "",
+                            }
+                        st.session_state["custom_bgm_validation"] = cached_validation
+
+                    if cached_validation.get("error"):
+                        if cached_validation.get("error_type") == "service":
+                            raise bgm_service.BgmServiceError(
+                                cached_validation["error"]
+                            )
+                        raise bgm_service.BgmUploadError(cached_validation["error"])
+                except bgm_service.BgmUploadError:
+                    # 非法文件不能沿用上一次有效上传的名称，否则任务参数可能仍指向
+                    # 历史 BGM。保留 UploadedFile 返回值，让用户点击生成时仍会被最终
+                    # 服务端校验拦截，而不是静默生成一条没有背景音乐的视频。
+                    params.bgm_file = ""
+                    st.error(tr("Invalid Background Music"))
+                except bgm_service.BgmServiceError:
+                    params.bgm_file = ""
+                    st.error(tr("Background Music Validation Failed"))
+                else:
+                    # 完整解码校验通过后才展示播放器和"已就绪"。文件仍只在点击
+                    # 生成时持久化，用户仅预览或随后移除文件不会污染 storage/bgm。
+                    uploaded_mime_type = str(
+                        getattr(uploaded_bgm_file, "type", "") or ""
+                    )
+                    preview_mime_type = (
+                        uploaded_mime_type
+                        if uploaded_mime_type.startswith("audio/")
+                        else mimetypes.guess_type(safe_name)[0] or "audio/mpeg"
+                    )
+                    st.audio(uploaded_bgm_file, format=preview_mime_type)
+                    st.info(f"{tr('Background Music Ready')}: {safe_name}")
+                    params.bgm_file = safe_name
+
+            # Streamlit 会在条件控件暂时不渲染时清理其 widget state。
+            # 从其它 BGM 来源切回时用已持久化值恢复；同一来源下
+            # 用户主动清空时 previous_bgm_type 不变，因此不会被旧值反弹。
+            if previous_bgm_type != "custom":
+                st.session_state["custom_bgm_file_input"] = _saved_ui_text(
+                    "custom_bgm_file"
+                )
+            custom_bgm_file = st.text_input(
+                tr("Custom Background Music File"),
+                key="custom_bgm_file_input",
+                disabled=uploaded_bgm_file is not None,
+            )
+            _set_runtime_config(
+                "ui", "custom_bgm_file", custom_bgm_file.strip()
+            )
+            if uploaded_bgm_file is None and custom_bgm_file and bgm_enabled_preview:
+                # 文件名由服务层映射到 storage/bgm 或 resource/songs 后校验，
+                # UI 不接受两个白名单目录之外的任意路径。
+                params.bgm_file = custom_bgm_file.strip()
+            elif not bgm_enabled_preview:
+                # 上传控件继续保留用户已选择的文件，调高音量后的下一次 rerun 会自动
+                # 完整校验；当前任务参数必须清空，避免 0 音量任务保存或解析该文件。
                 params.bgm_file = ""
-                st.error(tr("Invalid Background Music"))
-            except bgm_service.BgmServiceError:
+
+        if current_bgm_type == "preset":
+            # 服务层已经统一完成扩展名、临时文件和符号链接校验。这里直接复用其
+            # 结果，避免 UI 维护第二套枚举规则，后续新增格式时也不会出现差异。
+            available_song_paths = bgm_service.list_builtin_bgm_files()
+            songs_by_name = {
+                os.path.basename(song_path): song_path
+                for song_path in available_song_paths
+            }
+            available_songs = list(songs_by_name)
+            if not available_songs:
+                st.warning(tr("No Background Music Available"))
                 params.bgm_file = ""
-                st.error(tr("Background Music Validation Failed"))
             else:
-                # 完整解码校验通过后才展示播放器和“已就绪”。文件仍只在点击
-                # 生成时持久化，用户仅预览或随后移除文件不会污染 storage/bgm。
-                uploaded_mime_type = str(getattr(uploaded_bgm_file, "type", "") or "")
+                default_preset_song = _saved_ui_text("preset_song", available_songs[0])
+                requested_preset_song = st.session_state.get(
+                    localized_widget_key("preset_song_select"), default_preset_song
+                )
+                if requested_preset_song not in available_songs:
+                    # 历史任务或其它版本导出的设置可能引用当前安装中不存在的歌曲。
+                    # 明确提示后由 stable_selectbox 回退第一首，避免静默换歌。
+                    st.warning(tr("Selected Background Music Unavailable"))
+                selected_song = stable_selectbox(
+                    tr("Preset Song"),
+                    options=available_songs,
+                    default_value=(
+                        default_preset_song
+                        if default_preset_song in available_songs
+                        else available_songs[0]
+                    ),
+                    key="preset_song_select",
+                )
+                _set_runtime_config("ui", "preset_song", selected_song)
+                # 用户选择歌曲后立即提供在线试听。播放器读取的是刚刚通过服务层
+                # 白名单校验得到的真实路径，不接受页面输入的任意文件路径。
+                selected_song_path = songs_by_name[selected_song]
                 preview_mime_type = (
-                    uploaded_mime_type
-                    if uploaded_mime_type.startswith("audio/")
-                    else mimetypes.guess_type(safe_name)[0] or "audio/mpeg"
+                    mimetypes.guess_type(selected_song_path)[0] or "audio/mpeg"
                 )
-                st.audio(uploaded_bgm_file, format=preview_mime_type)
-                st.info(f"{tr('Background Music Ready')}: {safe_name}")
-                params.bgm_file = safe_name
-
-        # Streamlit 会在条件控件暂时不渲染时清理其 widget state。
-        # 从其它 BGM 来源切回时用已持久化值恢复；同一来源下
-        # 用户主动清空时 previous_bgm_type 不变，因此不会被旧值反弹。
-        if previous_bgm_type != "custom":
-            st.session_state["custom_bgm_file_input"] = _saved_ui_text(
-                "custom_bgm_file"
-            )
-        custom_bgm_file = st.text_input(
-            tr("Custom Background Music File"),
-            key="custom_bgm_file_input",
-            disabled=uploaded_bgm_file is not None,
-        )
-        _set_runtime_config(
-            "ui", "custom_bgm_file", custom_bgm_file.strip()
-        )
-        if uploaded_bgm_file is None and custom_bgm_file and bgm_enabled:
-            # 文件名由服务层映射到 storage/bgm 或 resource/songs 后校验，
-            # UI 不接受两个白名单目录之外的任意路径。
-            params.bgm_file = custom_bgm_file.strip()
-        elif not bgm_enabled:
-            # 上传控件继续保留用户已选择的文件，调高音量后的下一次 rerun 会自动
-            # 完整校验；当前任务参数必须清空，避免 0 音量任务保存或解析该文件。
-            params.bgm_file = ""
-
-    if params.bgm_type == "preset":
-        # 服务层已经统一完成扩展名、临时文件和符号链接校验。这里直接复用其
-        # 结果，避免 UI 维护第二套枚举规则，后续新增格式时也不会出现差异。
-        available_song_paths = bgm_service.list_builtin_bgm_files()
-        songs_by_name = {
-            os.path.basename(song_path): song_path for song_path in available_song_paths
-        }
-        available_songs = list(songs_by_name)
-        if not available_songs:
-            st.warning(tr("No Background Music Available"))
-            params.bgm_file = ""
-        else:
-            default_preset_song = _saved_ui_text("preset_song", available_songs[0])
-            requested_preset_song = st.session_state.get(
-                localized_widget_key("preset_song_select"), default_preset_song
-            )
-            if requested_preset_song not in available_songs:
-                # 历史任务或其它版本导出的设置可能引用当前安装中不存在的歌曲。
-                # 明确提示后由 stable_selectbox 回退第一首，避免静默换歌。
-                st.warning(tr("Selected Background Music Unavailable"))
-            selected_song = stable_selectbox(
-                tr("Preset Song"),
-                options=available_songs,
-                default_value=(
-                    default_preset_song
-                    if default_preset_song in available_songs
-                    else available_songs[0]
-                ),
-                key="preset_song_select",
-            )
-            _set_runtime_config("ui", "preset_song", selected_song)
-            # 用户选择歌曲后立即提供在线试听。播放器读取的是刚刚通过服务层
-            # 白名单校验得到的真实路径，不接受页面输入的任意文件路径。
-            selected_song_path = songs_by_name[selected_song]
-            preview_mime_type = (
-                mimetypes.guess_type(selected_song_path)[0] or "audio/mpeg"
-            )
-            preview_available = True
-            try:
-                # Streamlit 读取路径失败时会把 OSError 包装成内部异常，导致下面
-                # 无法按文件错误处理。先自行读取字节，既保持播放器行为，也让
-                # Docker 挂载短暂失效、权限变化等情况稳定落入可控分支。
-                selected_song_bytes = Path(selected_song_path).read_bytes()
-            except OSError as exc:
-                preview_available = False
-                # 文件可能在枚举后被其它进程删除。试听失败不能中断页面或视频
-                # 参数编辑，但需要保留日志以便定位运行环境和挂载问题。
-                logger.warning(
-                    "failed to preview preset background music: "
-                    f"name={selected_song}, error={str(exc)}"
+                preview_available = True
+                try:
+                    # Streamlit 读取路径失败时会把 OSError 包装成内部异常，导致下面
+                    # 无法按文件错误处理。先自行读取字节，既保持播放器行为，也让
+                    # Docker 挂载短暂失效、权限变化等情况稳定落入可控分支。
+                    selected_song_bytes = Path(selected_song_path).read_bytes()
+                except OSError as exc:
+                    preview_available = False
+                    # 文件可能在枚举后被其它进程删除。试听失败不能中断页面或视频
+                    # 参数编辑，但需要保留日志以便定位运行环境和挂载问题。
+                    logger.warning(
+                        "failed to preview preset background music: "
+                        f"name={selected_song}, error={str(exc)}"
+                    )
+                    st.warning(tr("Background Music Preview Failed"))
+                else:
+                    st.audio(selected_song_bytes, format=preview_mime_type)
+                bgm_enabled_preview = bgm_service.should_use_bgm(
+                    current_bgm_type, params.bgm_volume
                 )
-                st.warning(tr("Background Music Preview Failed"))
-            else:
-                st.audio(selected_song_bytes, format=preview_mime_type)
-            if bgm_enabled and preview_available:
-                params.bgm_file = selected_song
-            else:
-                params.bgm_file = ""
+                if bgm_enabled_preview and preview_available:
+                    params.bgm_file = selected_song
+                else:
+                    params.bgm_file = ""
 
-    if params.bgm_type == "sonilo":
-        if previous_bgm_type != "sonilo":
-            st.session_state["sonilo_bgm_prompt_input"] = _saved_ui_text(
-                "sonilo_bgm_prompt",
-                max_length=sonilo_service.MAX_PROMPT_LENGTH,
-            )
-        params.video_music_prompt = st.text_input(
-            tr("Sonilo Music Prompt"),
-            key="sonilo_bgm_prompt_input",
-            max_chars=sonilo_service.MAX_PROMPT_LENGTH,
-            help=tr("Sonilo Music Prompt Help"),
-        ).strip()
-        _set_runtime_config(
-            "ui", "sonilo_bgm_prompt", params.video_music_prompt
+    with online_tab:
+        _render_jamendo_bgm_picker(params)
+
+        advanced_mode = _is_advanced_mode()
+        if advanced_mode or current_bgm_type in {"sonilo", "elevenlabs"}:
+            with st.expander(tr("AI Generated Music (Paid)"), expanded=False):
+                online_ai_default = (
+                    current_bgm_type if current_bgm_type in online_ai_values else ""
+                )
+                st.session_state.setdefault(
+                    "_bgm_online_ai_choice_prev", online_ai_default
+                )
+                online_ai_choice = stable_selectbox(
+                    tr("AI Music Provider"),
+                    options=online_ai_values,
+                    default_value=online_ai_default,
+                    key="bgm_online_ai_type_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in online_ai_bgm_options
+                    )[value],
+                )
+                if online_ai_choice != st.session_state["_bgm_online_ai_choice_prev"]:
+                    st.session_state["_bgm_online_ai_choice_prev"] = online_ai_choice
+                    st.session_state["bgm_type"] = online_ai_choice
+                    current_bgm_type = online_ai_choice
+
+                if current_bgm_type == "sonilo":
+                    configured_key = str(
+                        config.app.get("sonilo_api_key", "") or ""
+                    ).strip()
+                    effective_key = configured_key or os.getenv(
+                        "SONILO_API_KEY", ""
+                    ).strip()
+                    entered_key = st.text_input(
+                        tr("Sonilo API Key"),
+                        value=effective_key,
+                        type="password",
+                        key="sonilo_api_key_input",
+                    ).strip()
+                    # 用户要求已配置的 Key 直接回填到密码输入框。配置值优先于环境
+                    # 变量；仅当用户确实修改输入或本来就使用配置时写回，避免把
+                    # 环境变量中的 Key 在无操作的情况下复制进 config.toml。
+                    if configured_key or entered_key != effective_key:
+                        _set_runtime_config("app", "sonilo_api_key", entered_key)
+                    if previous_bgm_type != "sonilo":
+                        st.session_state["sonilo_bgm_prompt_input"] = _saved_ui_text(
+                            "sonilo_bgm_prompt",
+                            max_length=sonilo_service.MAX_PROMPT_LENGTH,
+                        )
+                    params.video_music_prompt = st.text_input(
+                        tr("Sonilo Music Prompt"),
+                        key="sonilo_bgm_prompt_input",
+                        max_chars=sonilo_service.MAX_PROMPT_LENGTH,
+                        help=tr("Sonilo Music Prompt Help"),
+                    ).strip()
+                    _set_runtime_config(
+                        "ui", "sonilo_bgm_prompt", params.video_music_prompt
+                    )
+                    if params.video_count > 1:
+                        st.warning(tr("Sonilo Multiple Videos Warning"))
+                    if st.button(
+                        tr("Test Sonilo Connection"),
+                        key="test_sonilo_connection_button",
+                        use_container_width=True,
+                    ):
+                        try:
+                            sonilo_service.test_connection()
+                        except sonilo_service.SoniloError as exc:
+                            logger.warning(f"Sonilo connection test failed: {exc}")
+                            st.error(
+                                tr("Sonilo Connection Test Failed").format(
+                                    error=str(exc)
+                                )
+                            )
+                        else:
+                            st.success(tr("Sonilo Connection Test Succeeded"))
+                    if (
+                        bgm_service.should_use_bgm(current_bgm_type, params.bgm_volume)
+                        and not sonilo_service.is_enabled()
+                    ):
+                        st.warning(tr("Sonilo API Key Required"))
+                elif current_bgm_type == "elevenlabs":
+                    if elevenlabs_api_key_rendered:
+                        # TTS 区域已经渲染共享输入框时不再创建第二个 widget，避免
+                        # 两个独立 session_state 值互相覆盖。说明文字帮助用户
+                        # 定位上方的共用配置。
+                        st.caption(tr("ElevenLabs API Key Help"))
+                    else:
+                        _render_elevenlabs_api_key_input("ElevenLabs Music API Key")
+                    if previous_bgm_type != "elevenlabs":
+                        st.session_state[
+                            "elevenlabs_music_prompt_input"
+                        ] = _saved_ui_text(
+                            "elevenlabs_music_prompt",
+                            max_length=elevenlabs_music_service.MAX_PROMPT_LENGTH,
+                        )
+                    params.video_music_prompt = st.text_input(
+                        tr("ElevenLabs Music Prompt"),
+                        key="elevenlabs_music_prompt_input",
+                        max_chars=elevenlabs_music_service.MAX_PROMPT_LENGTH,
+                        help=tr("ElevenLabs Music Prompt Help"),
+                    ).strip()
+                    _set_runtime_config(
+                        "ui", "elevenlabs_music_prompt", params.video_music_prompt
+                    )
+                    if params.video_count > 1:
+                        st.warning(tr("ElevenLabs Multiple Videos Warning"))
+                    if st.button(
+                        tr("Test ElevenLabs Connection"),
+                        key="test_elevenlabs_music_connection_button",
+                        use_container_width=True,
+                    ):
+                        try:
+                            elevenlabs_music_service.test_connection()
+                        except elevenlabs_music_service.ElevenLabsPaidPlanRequiredError:
+                            st.error(tr("ElevenLabs Paid Plan Required"))
+                        except elevenlabs_music_service.ElevenLabsMusicError as exc:
+                            logger.warning(
+                                f"ElevenLabs connection test failed: {exc}"
+                            )
+                            st.error(
+                                tr("ElevenLabs Connection Test Failed").format(
+                                    error=str(exc)
+                                )
+                            )
+                        else:
+                            st.success(tr("ElevenLabs Connection Test Succeeded"))
+                    if (
+                        bgm_service.should_use_bgm(current_bgm_type, params.bgm_volume)
+                        and not elevenlabs_music_service.is_enabled()
+                    ):
+                        st.warning(tr("ElevenLabs API Key Required"))
+
+    params.bgm_type = current_bgm_type
+    _set_runtime_config("ui", "bgm_type", params.bgm_type)
+
+    if params.bgm_type == "jamendo":
+        params.bgm_file = (
+            config.ui.get("jamendo_bgm_file", "")
+            if bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
+            else ""
         )
-        if params.video_count > 1:
-            st.warning(tr("Sonilo Multiple Videos Warning"))
-        if st.button(
-            tr("Test Sonilo Connection"),
-            key="test_sonilo_connection_button",
-            use_container_width=True,
-        ):
-            try:
-                sonilo_service.test_connection()
-            except sonilo_service.SoniloError as exc:
-                logger.warning(f"Sonilo connection test failed: {exc}")
-                st.error(tr("Sonilo Connection Test Failed").format(error=str(exc)))
-            else:
-                st.success(tr("Sonilo Connection Test Succeeded"))
-    elif params.bgm_type == "elevenlabs":
-        if previous_bgm_type != "elevenlabs":
-            st.session_state["elevenlabs_music_prompt_input"] = _saved_ui_text(
-                "elevenlabs_music_prompt",
-                max_length=elevenlabs_music_service.MAX_PROMPT_LENGTH,
-            )
-        params.video_music_prompt = st.text_input(
-            tr("ElevenLabs Music Prompt"),
-            key="elevenlabs_music_prompt_input",
-            max_chars=elevenlabs_music_service.MAX_PROMPT_LENGTH,
-            help=tr("ElevenLabs Music Prompt Help"),
-        ).strip()
-        _set_runtime_config(
-            "ui", "elevenlabs_music_prompt", params.video_music_prompt
-        )
-        if params.video_count > 1:
-            st.warning(tr("ElevenLabs Multiple Videos Warning"))
-        if st.button(
-            tr("Test ElevenLabs Connection"),
-            key="test_elevenlabs_music_connection_button",
-            use_container_width=True,
-        ):
-            try:
-                elevenlabs_music_service.test_connection()
-            except elevenlabs_music_service.ElevenLabsPaidPlanRequiredError:
-                st.error(tr("ElevenLabs Paid Plan Required"))
-            except elevenlabs_music_service.ElevenLabsMusicError as exc:
-                logger.warning(f"ElevenLabs connection test failed: {exc}")
-                st.error(tr("ElevenLabs Connection Test Failed").format(error=str(exc)))
-            else:
-                st.success(tr("ElevenLabs Connection Test Succeeded"))
-    if params.bgm_type == "sonilo" and bgm_enabled and not sonilo_service.is_enabled():
-        # 音量为 0 时任务层不会生成或混合 Sonilo 配乐，因此无需提示 Key；
-        # 该判断与任务入口共用服务层规则，避免界面提示和实际执行条件分叉。
-        st.warning(tr("Sonilo API Key Required"))
-    elif (
-        params.bgm_type == "elevenlabs"
-        and bgm_enabled
-        and not elevenlabs_music_service.is_enabled()
-    ):
-        st.warning(tr("ElevenLabs API Key Required"))
+
     st.session_state["last_rendered_bgm_type"] = params.bgm_type
     return uploaded_bgm_file
 
@@ -6385,7 +6812,7 @@ def _render_audio_settings(panel, params):
 
             # Provider 下拉只负责选择自动配音服务；无配音已经由上方模式控制，
             # 不再作为 TTS Provider 混入列表，避免两个入口表达同一状态。
-            tts_servers = [
+            all_tts_servers = [
                 ("azure-tts-v1", "Azure TTS V1 (Edge TTS)"),
                 ("azure-tts-v2", "Azure TTS V2"),
                 ("siliconflow", "SiliconFlow TTS"),
@@ -6398,6 +6825,22 @@ def _render_audio_settings(panel, params):
                 ("fish_audio", "Fish Audio TTS"),
                 ("voxcpm", "VoxCPM TTS"),
             ]
+            advanced_mode = _is_advanced_mode()
+            if advanced_mode:
+                tts_servers = all_tts_servers
+            else:
+                # 基础模式只保留免费、无需申请 Key 的 Edge TTS。如果之前已经在
+                # 高级模式下选过其它付费服务，把那一项也带上，避免静默换回
+                # Edge TTS、丢掉用户已经配置好的 Provider。
+                tts_servers = [
+                    server for server in all_tts_servers if server[0] == "azure-tts-v1"
+                ]
+                if saved_tts_server not in [s[0] for s in tts_servers]:
+                    existing = next(
+                        (s for s in all_tts_servers if s[0] == saved_tts_server), None
+                    )
+                    if existing:
+                        tts_servers.append(existing)
 
             tts_server_values = [server_value for server_value, _ in tts_servers]
             if saved_tts_server not in tts_server_values:
@@ -6475,11 +6918,26 @@ def _render_audio_settings(panel, params):
             elif selected_tts_server == "voxcpm":
                 filtered_voices = voice.get_voxcpm_voices()
             else:
-                # 获取Azure的声音列表
+                # 获取Azure的声音列表。基础模式只保留越南语声音，减少下拉框
+                # 噪音；如果之前已经选过其它语言的声音，把它带回列表里，
+                # 避免切到基础模式后静默换成别的声音。
                 all_voices = voice.get_all_azure_voices(filter_locals=None)
+                if advanced_mode:
+                    locale_filtered_voices = all_voices
+                else:
+                    locale_filtered_voices = voice.get_all_azure_voices(
+                        filter_locals=["vi-VN"]
+                    )
+                    if saved_voice_name in all_voices and (
+                        saved_voice_name not in locale_filtered_voices
+                    ):
+                        locale_filtered_voices = [
+                            *locale_filtered_voices,
+                            saved_voice_name,
+                        ]
 
                 # 根据选择的TTS服务器筛选声音
-                for v in all_voices:
+                for v in locale_filtered_voices:
                     if selected_tts_server == "azure-tts-v2":
                         # V2版本的声音名称中包含"v2"
                         if "V2" in v:
@@ -6998,6 +7456,36 @@ def _render_subtitle_settings(panel, params):
             )
             _set_runtime_config("ui", "font_name", params.font_name)
 
+            # 常用外观设置放在最上面：字体已经在上方，这里紧跟颜色和字号，
+            # 位置调整也是高频操作，一并留在基础区域。精细调参（展示方式、
+            # 动效、描边、背景）收进下面的折叠区，减少默认可见的控件数量。
+            font_cols = st.columns([0.42, 0.58])
+            with font_cols[0]:
+                saved_text_fore_color = config.ui.get(
+                    "text_fore_color", DEFAULT_SUBTITLE_SETTINGS["text_fore_color"]
+                )
+                st.session_state.setdefault("font_color_picker", saved_text_fore_color)
+                params.text_fore_color = st.color_picker(
+                    tr("Font Color"),
+                    key="font_color_picker",
+                    disabled=subtitle_settings_disabled,
+                )
+                _set_runtime_config("ui", "text_fore_color", params.text_fore_color)
+
+            with font_cols[1]:
+                saved_font_size = config.ui.get(
+                    "font_size", DEFAULT_SUBTITLE_SETTINGS["font_size"]
+                )
+                st.session_state.setdefault("font_size_slider", saved_font_size)
+                params.font_size = st.slider(
+                    tr("Font Size"),
+                    30,
+                    100,
+                    key="font_size_slider",
+                    disabled=subtitle_settings_disabled,
+                )
+                _set_runtime_config("ui", "font_size", params.font_size)
+
             subtitle_positions = [
                 (tr("Top"), "top"),
                 (tr("Center"), "center"),
@@ -7026,65 +7514,6 @@ def _render_subtitle_settings(panel, params):
             params.subtitle_position = selected_subtitle_position
             _set_runtime_config("ui", "subtitle_position", params.subtitle_position)
 
-            # Subtitle Display Mode (Sentence vs Single Word)
-            subtitle_display_modes = [
-                (tr("Sentence by Sentence"), "sentence"),
-                (tr("Single Word (Word by Word)"), "word_by_word"),
-            ]
-            saved_display_mode = config.ui.get(
-                "subtitle_display_mode",
-                DEFAULT_SUBTITLE_SETTINGS["subtitle_display_mode"],
-            )
-            saved_mode_idx = 0
-            for i, (_, mode_val) in enumerate(subtitle_display_modes):
-                if mode_val == saved_display_mode:
-                    saved_mode_idx = i
-                    break
-            selected_display_mode = stable_selectbox(
-                tr("Display Mode"),
-                options=[val for _, val in subtitle_display_modes],
-                default_value=subtitle_display_modes[saved_mode_idx][1],
-                key="subtitle_display_mode_select",
-                format_func=lambda value: dict(
-                    (v, label) for label, v in subtitle_display_modes
-                ).get(value, value),
-                help=tr("Word-by-word Timing Help"),
-                disabled=subtitle_settings_disabled,
-            )
-            params.subtitle_display_mode = selected_display_mode
-            _set_runtime_config(
-                "ui", "subtitle_display_mode", params.subtitle_display_mode
-            )
-
-            # Subtitle Animation (None vs Pop Spring)
-            subtitle_animations = [
-                (tr("None"), "none"),
-                (tr("Pop Up (Spring)"), "pop_spring"),
-            ]
-            saved_anim = config.ui.get(
-                "subtitle_animation",
-                DEFAULT_SUBTITLE_SETTINGS["subtitle_animation"],
-            )
-            saved_anim_idx = 0
-            for i, (_, anim_val) in enumerate(subtitle_animations):
-                if anim_val == saved_anim:
-                    saved_anim_idx = i
-                    break
-            selected_anim = stable_selectbox(
-                tr("Subtitle Animation"),
-                options=[val for _, val in subtitle_animations],
-                default_value=subtitle_animations[saved_anim_idx][1],
-                key="subtitle_animation_select",
-                format_func=lambda value: dict(
-                    (v, label) for label, v in subtitle_animations
-                ).get(value, value),
-                disabled=subtitle_settings_disabled,
-            )
-            params.subtitle_animation = selected_anim
-            _set_runtime_config(
-                "ui", "subtitle_animation", params.subtitle_animation
-            )
-
             if params.subtitle_position == "custom":
                 saved_custom_position = config.ui.get(
                     "custom_position", DEFAULT_SUBTITLE_SETTINGS["custom_position"]
@@ -7108,150 +7537,181 @@ def _render_subtitle_settings(panel, params):
                 except ValueError:
                     st.error(tr("Please enter a valid number"))
 
-            # 非中文语言的颜色标签通常比中文更长。为颜色选择器保留适当宽度，
-            # 避免标签换行，同时仍给字号滑块保留足够的可操作空间。
-            font_cols = st.columns([0.42, 0.58])
-            with font_cols[0]:
-                saved_text_fore_color = config.ui.get(
-                    "text_fore_color", DEFAULT_SUBTITLE_SETTINGS["text_fore_color"]
+            with st.expander(tr("Subtitle Fine-tuning"), expanded=False):
+                # Subtitle Display Mode (Sentence vs Single Word)
+                subtitle_display_modes = [
+                    (tr("Sentence by Sentence"), "sentence"),
+                    (tr("Single Word (Word by Word)"), "word_by_word"),
+                ]
+                saved_display_mode = config.ui.get(
+                    "subtitle_display_mode",
+                    DEFAULT_SUBTITLE_SETTINGS["subtitle_display_mode"],
                 )
-                st.session_state.setdefault("font_color_picker", saved_text_fore_color)
-                params.text_fore_color = st.color_picker(
-                    tr("Font Color"),
-                    key="font_color_picker",
+                saved_mode_idx = 0
+                for i, (_, mode_val) in enumerate(subtitle_display_modes):
+                    if mode_val == saved_display_mode:
+                        saved_mode_idx = i
+                        break
+                selected_display_mode = stable_selectbox(
+                    tr("Display Mode"),
+                    options=[val for _, val in subtitle_display_modes],
+                    default_value=subtitle_display_modes[saved_mode_idx][1],
+                    key="subtitle_display_mode_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in subtitle_display_modes
+                    ).get(value, value),
+                    help=tr("Word-by-word Timing Help"),
                     disabled=subtitle_settings_disabled,
                 )
-                _set_runtime_config("ui", "text_fore_color", params.text_fore_color)
+                params.subtitle_display_mode = selected_display_mode
+                _set_runtime_config(
+                    "ui", "subtitle_display_mode", params.subtitle_display_mode
+                )
 
-            with font_cols[1]:
-                saved_font_size = config.ui.get(
-                    "font_size", DEFAULT_SUBTITLE_SETTINGS["font_size"]
+                # Subtitle Animation (None vs Pop Spring)
+                subtitle_animations = [
+                    (tr("None"), "none"),
+                    (tr("Pop Up (Spring)"), "pop_spring"),
+                ]
+                saved_anim = config.ui.get(
+                    "subtitle_animation",
+                    DEFAULT_SUBTITLE_SETTINGS["subtitle_animation"],
                 )
-                st.session_state.setdefault("font_size_slider", saved_font_size)
-                params.font_size = st.slider(
-                    tr("Font Size"),
-                    30,
-                    100,
-                    key="font_size_slider",
+                saved_anim_idx = 0
+                for i, (_, anim_val) in enumerate(subtitle_animations):
+                    if anim_val == saved_anim:
+                        saved_anim_idx = i
+                        break
+                selected_anim = stable_selectbox(
+                    tr("Subtitle Animation"),
+                    options=[val for _, val in subtitle_animations],
+                    default_value=subtitle_animations[saved_anim_idx][1],
+                    key="subtitle_animation_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in subtitle_animations
+                    ).get(value, value),
                     disabled=subtitle_settings_disabled,
                 )
-                _set_runtime_config("ui", "font_size", params.font_size)
+                params.subtitle_animation = selected_anim
+                _set_runtime_config(
+                    "ui", "subtitle_animation", params.subtitle_animation
+                )
 
-            stroke_cols = st.columns([0.42, 0.58])
-            with stroke_cols[0]:
-                st.session_state.setdefault(
-                    "stroke_color_picker",
-                    _saved_ui_color(
-                        "stroke_color", DEFAULT_SUBTITLE_SETTINGS["stroke_color"]
-                    ),
-                )
-                params.stroke_color = st.color_picker(
-                    tr("Stroke Color"),
-                    key="stroke_color_picker",
-                    disabled=subtitle_settings_disabled,
-                )
-                _set_runtime_config("ui", "stroke_color", params.stroke_color)
-            with stroke_cols[1]:
-                st.session_state.setdefault(
-                    "stroke_width_slider",
-                    _saved_ui_number(
-                        "stroke_width",
-                        DEFAULT_SUBTITLE_SETTINGS["stroke_width"],
+                stroke_cols = st.columns([0.42, 0.58])
+                with stroke_cols[0]:
+                    st.session_state.setdefault(
+                        "stroke_color_picker",
+                        _saved_ui_color(
+                            "stroke_color", DEFAULT_SUBTITLE_SETTINGS["stroke_color"]
+                        ),
+                    )
+                    params.stroke_color = st.color_picker(
+                        tr("Stroke Color"),
+                        key="stroke_color_picker",
+                        disabled=subtitle_settings_disabled,
+                    )
+                    _set_runtime_config("ui", "stroke_color", params.stroke_color)
+                with stroke_cols[1]:
+                    st.session_state.setdefault(
+                        "stroke_width_slider",
+                        _saved_ui_number(
+                            "stroke_width",
+                            DEFAULT_SUBTITLE_SETTINGS["stroke_width"],
+                            0.0,
+                            10.0,
+                        ),
+                    )
+                    params.stroke_width = st.slider(
+                        tr("Stroke Width"),
                         0.0,
                         10.0,
-                    ),
-                )
-                params.stroke_width = st.slider(
-                    tr("Stroke Width"),
-                    0.0,
-                    10.0,
-                    key="stroke_width_slider",
-                    disabled=subtitle_settings_disabled,
-                )
-                _set_runtime_config("ui", "stroke_width", params.stroke_width)
+                        key="stroke_width_slider",
+                        disabled=subtitle_settings_disabled,
+                    )
+                    _set_runtime_config("ui", "stroke_width", params.stroke_width)
 
-            # 背景开关的本地化名称普遍比颜色标签更长，因此让开关占据略多空间。
-            subtitle_bg_cols = st.columns([0.55, 0.45])
-            saved_subtitle_background_enabled = config.ui.get(
-                "subtitle_background_enabled",
-                DEFAULT_SUBTITLE_SETTINGS["subtitle_background_enabled"],
-            )
-            st.session_state.setdefault(
-                "subtitle_background_enabled_checkbox",
-                saved_subtitle_background_enabled,
-            )
-            with subtitle_bg_cols[0]:
-                subtitle_background_enabled = st.checkbox(
-                    tr("Enable Subtitle Background"),
-                    key="subtitle_background_enabled_checkbox",
-                    disabled=subtitle_settings_disabled,
+                # 背景开关的本地化名称普遍比颜色标签更长，因此让开关占据略多空间。
+                subtitle_bg_cols = st.columns([0.55, 0.45])
+                saved_subtitle_background_enabled = config.ui.get(
+                    "subtitle_background_enabled",
+                    DEFAULT_SUBTITLE_SETTINGS["subtitle_background_enabled"],
                 )
-            _set_runtime_config(
-                "ui",
-                "subtitle_background_enabled",
-                subtitle_background_enabled,
-            )
-
-            # 背景颜色和圆角样式都从属于字幕背景开关。子控件始终保留在页面中，
-            # 父开关关闭时统一禁用，避免一个控件消失而另一个控件禁用造成布局跳动。
-            # 颜色值仍保存在 UI 配置中，重新启用背景后可以恢复用户之前的选择；
-            # 传给生成服务的参数则设为 False，确保关闭状态不会实际渲染背景。
-            saved_subtitle_background_color = config.ui.get(
-                "subtitle_background_color",
-                DEFAULT_SUBTITLE_SETTINGS["subtitle_background_color"],
-            )
-            st.session_state.setdefault(
-                "subtitle_background_color_picker",
-                saved_subtitle_background_color,
-            )
-            with subtitle_bg_cols[1]:
-                selected_subtitle_background_color = st.color_picker(
-                    tr("Subtitle Background Color"),
-                    key="subtitle_background_color_picker",
-                    disabled=subtitle_settings_disabled
-                    or not subtitle_background_enabled,
+                st.session_state.setdefault(
+                    "subtitle_background_enabled_checkbox",
+                    saved_subtitle_background_enabled,
                 )
-            _set_runtime_config(
-                "ui",
-                "subtitle_background_color",
-                selected_subtitle_background_color,
-            )
-            params.text_background_color = (
-                selected_subtitle_background_color
-                if subtitle_background_enabled
-                else False
-            )
-
-            saved_rounded_subtitle_background = config.ui.get(
-                "rounded_subtitle_background",
-                DEFAULT_SUBTITLE_SETTINGS["rounded_subtitle_background"],
-            )
-            # 背景关闭时，圆角背景没有可渲染的底色。这里禁用控件但保留原配置，
-            # 用户下次重新开启字幕背景后，可以继续使用之前保存的圆角偏好。
-            rounded_background_disabled = (
-                subtitle_settings_disabled or not subtitle_background_enabled
-            )
-            st.session_state.setdefault(
-                "rounded_subtitle_background_checkbox",
-                saved_rounded_subtitle_background,
-            )
-            selected_rounded_subtitle_background = st.checkbox(
-                tr("Rounded Subtitle Background"),
-                help=tr("Rounded Subtitle Background Help"),
-                disabled=rounded_background_disabled,
-                key="rounded_subtitle_background_checkbox",
-            )
-            params.rounded_subtitle_background = (
-                selected_rounded_subtitle_background
-                if subtitle_background_enabled
-                else False
-            )
-            if not subtitle_settings_disabled and subtitle_background_enabled:
+                with subtitle_bg_cols[0]:
+                    subtitle_background_enabled = st.checkbox(
+                        tr("Enable Subtitle Background"),
+                        key="subtitle_background_enabled_checkbox",
+                        disabled=subtitle_settings_disabled,
+                    )
                 _set_runtime_config(
                     "ui",
-                    "rounded_subtitle_background",
-                    selected_rounded_subtitle_background,
+                    "subtitle_background_enabled",
+                    subtitle_background_enabled,
                 )
+
+                # 背景颜色和圆角样式都从属于字幕背景开关。子控件始终保留在页面中，
+                # 父开关关闭时统一禁用，避免一个控件消失而另一个控件禁用造成布局跳动。
+                # 颜色值仍保存在 UI 配置中，重新启用背景后可以恢复用户之前的选择；
+                # 传给生成服务的参数则设为 False，确保关闭状态不会实际渲染背景。
+                saved_subtitle_background_color = config.ui.get(
+                    "subtitle_background_color",
+                    DEFAULT_SUBTITLE_SETTINGS["subtitle_background_color"],
+                )
+                st.session_state.setdefault(
+                    "subtitle_background_color_picker",
+                    saved_subtitle_background_color,
+                )
+                with subtitle_bg_cols[1]:
+                    selected_subtitle_background_color = st.color_picker(
+                        tr("Subtitle Background Color"),
+                        key="subtitle_background_color_picker",
+                        disabled=subtitle_settings_disabled
+                        or not subtitle_background_enabled,
+                    )
+                _set_runtime_config(
+                    "ui",
+                    "subtitle_background_color",
+                    selected_subtitle_background_color,
+                )
+                params.text_background_color = (
+                    selected_subtitle_background_color
+                    if subtitle_background_enabled
+                    else False
+                )
+
+                saved_rounded_subtitle_background = config.ui.get(
+                    "rounded_subtitle_background",
+                    DEFAULT_SUBTITLE_SETTINGS["rounded_subtitle_background"],
+                )
+                # 背景关闭时，圆角背景没有可渲染的底色。这里禁用控件但保留原配置，
+                # 用户下次重新开启字幕背景后，可以继续使用之前保存的圆角偏好。
+                rounded_background_disabled = (
+                    subtitle_settings_disabled or not subtitle_background_enabled
+                )
+                st.session_state.setdefault(
+                    "rounded_subtitle_background_checkbox",
+                    saved_rounded_subtitle_background,
+                )
+                selected_rounded_subtitle_background = st.checkbox(
+                    tr("Rounded Subtitle Background"),
+                    help=tr("Rounded Subtitle Background Help"),
+                    disabled=rounded_background_disabled,
+                    key="rounded_subtitle_background_checkbox",
+                )
+                params.rounded_subtitle_background = (
+                    selected_rounded_subtitle_background
+                    if subtitle_background_enabled
+                    else False
+                )
+                if not subtitle_settings_disabled and subtitle_background_enabled:
+                    _set_runtime_config(
+                        "ui",
+                        "rounded_subtitle_background",
+                        selected_rounded_subtitle_background,
+                    )
 
             if video.subtitle_colors_are_indistinguishable(params):
                 # 同色配置仍然是合法的用户选择，因此只在字幕设置区域就近提示，
@@ -7591,7 +8051,8 @@ def _render_generation_controls(
             # 将已上传并保存到本地的视频素材写入会话，供后续只改文案时直接复用。
             st.session_state["local_video_materials"] = persisted_local_materials
         elif (
-            params.video_source == "local" and st.session_state["local_video_materials"]
+            params.video_source in ("local", "product_media")
+            and st.session_state["local_video_materials"]
         ):
             # 当用户没有重新上传文件时，复用最近一次已经保存到磁盘的本地素材列表。
             params.video_materials = []
@@ -7670,6 +8131,8 @@ def _render_application():
     restore_succeeded = st.session_state.pop("task_restore_succeeded", False)
     if restore_applied or restore_succeeded:
         st.success(tr("Task Configuration Loaded"))
+
+    _render_advanced_settings_toggle()
 
     with st.container(key="main_settings_grid"):
         panel = st.columns(4)

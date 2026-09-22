@@ -6,3 +6,13 @@ toolbarMode = "minimal"
 
 [logger]
 hideWelcomeMessage = true
+
+# 原生控件（按钮、复选框、滑块、下拉框）的基础配色。深色模式由页面顶部栏的
+# 主题切换按钮通过 styles.css 的 CSS 变量在运行时覆盖，这里只提供服务器
+# 启动时的浅色默认值。
+[theme]
+base = "light"
+primaryColor = "#1668E3"
+backgroundColor = "#bfe6ff"
+secondaryBackgroundColor = "#f5fbff"
+textColor = "#16324a"

@@ -99,6 +99,39 @@ _SUPPORTED_VIDEO_CODECS = (
     "h264_videotoolbox",
 )
 _runtime_disabled_video_codecs = set()
+# "high" 不设码率上限，与升级前的历史行为完全一致；只有用户主动选择较低
+# 画质档位或设置体积上限时才会生效。数值面向 1080p 级别短视频调校。
+_OUTPUT_QUALITY_BITRATE_KBPS = {"low": 2500, "medium": 6000}
+_MIN_OUTPUT_VIDEO_BITRATE_KBPS = 300
+
+
+def _resolve_output_video_bitrate(
+    output_quality: str,
+    max_output_size_mb: float | None,
+    duration_seconds: float,
+    audio_bitrate_kbps: int,
+) -> str | None:
+    """
+    根据画质档位和可选的体积上限，计算传给 write_videofile 的目标视频码率。
+
+    两个约束取更严格（更小）的一个：画质档位给出一个软性码率上限，体积
+    上限则是反推出的硬性码率上限。两者都没有设置时返回 None，交给
+    moviepy/编码器使用默认码率，行为与升级前完全一致。
+    """
+    candidates = []
+    quality_kbps = _OUTPUT_QUALITY_BITRATE_KBPS.get(output_quality)
+    if quality_kbps:
+        candidates.append(quality_kbps)
+
+    if max_output_size_mb and duration_seconds > 0:
+        # 8192 = 8 bit/byte * 1024 KiB/MiB。用总码率减去音频码率得到视频
+        # 可用的部分，并保留一个下限，避免码率被压到不可用的程度。
+        total_kbps = (max_output_size_mb * 8192) / duration_seconds
+        candidates.append(max(total_kbps - audio_bitrate_kbps, _MIN_OUTPUT_VIDEO_BITRATE_KBPS))
+
+    if not candidates:
+        return None
+    return f"{int(min(candidates))}k"
 
 
 def _get_subtitle_spring_scale(time_seconds: float, duration_seconds: float) -> float:
@@ -1204,6 +1237,84 @@ def subtitle_font_supports_text(font_path: str, text: str) -> bool:
     return _subtitle_font_supports_sample(font_path, sample)
 
 
+_WATERMARK_INTRO_OUTRO_SECONDS = 3
+_WATERMARK_MARGIN_RATIO = 0.04
+_WATERMARK_FONT_SIZE_RATIO = 0.032
+_WATERMARK_MIN_FONT_SIZE = 16
+
+
+def _build_watermark_clips(
+    params: VideoParams,
+    *,
+    video_width: int,
+    video_height: int,
+    video_duration: float,
+    font_path: str,
+) -> list:
+    """
+    按用户设置生成水印文字片段列表，供最终合成时一并叠加。
+
+    "全程小角标"是一个跨越整段视频的片段；"仅片头片尾"是两个独立片段，
+    分别从开头和结尾各持续几秒，中间留空。两种模式共用同一个基础文字片段
+    和角落定位逻辑，只是各自设置不同的时间偏移。
+    """
+    text = str(params.watermark_text or "").strip()
+    if not params.watermark_enabled or not text or video_duration <= 0:
+        return []
+
+    font_size = max(
+        _WATERMARK_MIN_FONT_SIZE, int(video_height * _WATERMARK_FONT_SIZE_RATIO)
+    )
+    margin = int(video_height * _WATERMARK_MARGIN_RATIO)
+
+    def make_watermark_clip():
+        return TextClip(
+            text=text,
+            font=font_path,
+            font_size=font_size,
+            color="white",
+            stroke_color="black",
+            stroke_width=max(1, font_size // 16),
+        )
+
+    probe_clip = make_watermark_clip()
+    try:
+        clip_w, clip_h = probe_clip.w, probe_clip.h
+    finally:
+        close_clip(probe_clip)
+
+    corner = params.watermark_corner
+    x = margin if corner in ("top_left", "bottom_left") else video_width - margin - clip_w
+    y = margin if corner in ("top_left", "top_right") else video_height - margin - clip_h
+    position = (max(0, x), max(0, y))
+
+    if params.watermark_position == "intro_outro":
+        segment_seconds = min(_WATERMARK_INTRO_OUTRO_SECONDS, video_duration)
+        intro_clip = (
+            make_watermark_clip()
+            .with_position(position)
+            .with_start(0)
+            .with_duration(segment_seconds)
+        )
+        if video_duration <= segment_seconds:
+            # 视频本身比片头展示时长还短，片尾片段会与片头完全重叠，
+            # 只保留一个片段即可，避免叠加两条相同水印。
+            return [intro_clip]
+        outro_clip = (
+            make_watermark_clip()
+            .with_position(position)
+            .with_start(video_duration - segment_seconds)
+            .with_duration(segment_seconds)
+        )
+        return [intro_clip, outro_clip]
+
+    # corner_persistent：贯穿全片。
+    persistent_clip = (
+        make_watermark_clip().with_position(position).with_duration(video_duration)
+    )
+    return [persistent_clip]
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -1240,6 +1351,14 @@ def generate_video(
         font_path = os.path.join(utils.font_dir(), params.font_name)
         if os.name == "nt":
             font_path = font_path.replace("\\", "/")
+
+    # 水印字体与字幕字体解耦：字幕被禁用时上面的 font_path 仍是空字符串，
+    # 但水印需要独立开关，因此始终解析一个可用字体，不依赖字幕设置。
+    watermark_font_path = font_path
+    if not watermark_font_path:
+        watermark_font_path = os.path.join(utils.font_dir(), "STHeitiMedium.ttc")
+        if os.name == "nt":
+            watermark_font_path = watermark_font_path.replace("\\", "/")
 
         logger.info(f"  ⑤ font: {font_path}")
 
@@ -1456,6 +1575,17 @@ def generate_video(
             video_clip = CompositeVideoClip([video_clip, *text_clips])
             clip_stack.callback(video_clip.close)
 
+        watermark_clips = _build_watermark_clips(
+            params,
+            video_width=video_width,
+            video_height=video_height,
+            video_duration=video_clip.duration,
+            font_path=watermark_font_path,
+        )
+        if watermark_clips:
+            video_clip = CompositeVideoClip([video_clip, *watermark_clips])
+            clip_stack.callback(video_clip.close)
+
         bgm_enabled = bgm_service.should_use_bgm(
             params.bgm_type, params.bgm_volume
         )
@@ -1508,18 +1638,26 @@ def generate_video(
         # 显式沿用输入音频的采样率；如果取不到，再回退 MoviePy 默认的 44100Hz。
         # 这样可以减少不同环境，尤其 Docker 中再次重采样带来的音质波动。
         output_audio_fps = int(getattr(audio_clip, "fps", 0) or 44100)
-        _write_videofile_with_codec_fallback(
-            final_video_clip,
-            output_file=output_file,
-            codec=_get_configured_video_codec(),
-            audio_codec=audio_codec,
-            audio_fps=output_audio_fps,
-            audio_bitrate=audio_bitrate,
-            temp_audiofile_path=_get_temp_audio_dir(output_dir),
-            threads=params.n_threads or 2,
-            logger=None,
-            fps=fps,
+        output_bitrate = _resolve_output_video_bitrate(
+            getattr(params, "output_quality", "high") or "high",
+            getattr(params, "max_output_size_mb", None),
+            final_video_clip.duration,
+            int(audio_bitrate.rstrip("k")),
         )
+        write_videofile_kwargs = {
+            "output_file": output_file,
+            "codec": _get_configured_video_codec(),
+            "audio_codec": audio_codec,
+            "audio_fps": output_audio_fps,
+            "audio_bitrate": audio_bitrate,
+            "temp_audiofile_path": _get_temp_audio_dir(output_dir),
+            "threads": params.n_threads or 2,
+            "logger": None,
+            "fps": fps,
+        }
+        if output_bitrate:
+            write_videofile_kwargs["bitrate"] = output_bitrate
+        _write_videofile_with_codec_fallback(final_video_clip, **write_videofile_kwargs)
         return bgm_mix_succeeded
 
 

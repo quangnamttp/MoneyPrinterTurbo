@@ -114,6 +114,11 @@ class VideoParams(BaseModel):
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
     video_count: int = Field(default=1, ge=1)
+    # 两者都是可选的产出控制：不设置时行为与升级前完全一致（不做任何码率/
+    # 体积改动）。output_quality 映射到码率/CRF 挡位；max_output_size_mb
+    # 设置时会基于时长反推目标码率，做为体积硬上限。
+    output_quality: Literal["low", "medium", "high"] = "high"
+    max_output_size_mb: Optional[float] = Field(default=None, gt=0)
 
     video_source: Optional[str] = "pexels"
     video_materials: Optional[List[MaterialInfo]] = (
@@ -159,6 +164,17 @@ class VideoParams(BaseModel):
     paragraph_number: int = Field(default=1, ge=1, le=10)
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
+
+    # 自定义品牌水印：用户自行填写文字、选择角落和出现范围，默认关闭，
+    # 不影响任何现有任务。
+    watermark_enabled: bool = False
+    watermark_text: str = Field(default="", max_length=60)
+    watermark_position: Literal["corner_persistent", "intro_outro"] = (
+        "corner_persistent"
+    )
+    watermark_corner: Literal[
+        "top_left", "top_right", "bottom_left", "bottom_right"
+    ] = "bottom_right"
 
 
 class SubtitleRequest(BaseModel):

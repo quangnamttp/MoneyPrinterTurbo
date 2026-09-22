@@ -1,3 +1,119 @@
+/* ==========================================================================
+   主题变量。浅色为默认基调（背景 #bfe6ff），深色通过顶部栏按钮切换后由
+   Main.py 写入 <html data-theme="dark">。两套变量集中定义在这里，下方所有
+   组件级规则都引用这些变量，而不是各自硬编码颜色，方便统一调整。
+   ========================================================================== */
+:root {
+    --mpt-bg: #bfe6ff;
+    --mpt-surface: #f5fbff;
+    --mpt-surface-alt: #e3f2ff;
+    --mpt-border: #a9d4ee;
+    --mpt-text: #16324a;
+    --mpt-text-muted: #4c6b82;
+    --mpt-accent: #1668e3;
+    --mpt-accent-hover: #0f52b8;
+    --mpt-accent-text: #ffffff;
+    --mpt-shadow: 0 1px 3px rgba(22, 50, 74, 0.08), 0 1px 2px rgba(22, 50, 74, 0.06);
+}
+
+:root[data-theme="dark"] {
+    --mpt-bg: #0f2338;
+    --mpt-surface: #16324a;
+    --mpt-surface-alt: #1c3b57;
+    --mpt-border: #2c4a66;
+    --mpt-text: #e7f1fb;
+    --mpt-text-muted: #9db7cc;
+    --mpt-accent: #4c9aff;
+    --mpt-accent-hover: #6facff;
+    --mpt-accent-text: #04162a;
+    --mpt-shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+/* 主题切换脚本在首次绘制前不会立即执行；系统偏好深色且用户还没有显式选择
+   时，先用这一层做过渡，避免出现浅色背景闪烁。用户点击顶部栏按钮后，
+   data-theme 属性会覆盖这里的系统偏好。 */
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]):not([data-theme="dark"]) {
+        --mpt-bg: #0f2338;
+        --mpt-surface: #16324a;
+        --mpt-surface-alt: #1c3b57;
+        --mpt-border: #2c4a66;
+        --mpt-text: #e7f1fb;
+        --mpt-text-muted: #9db7cc;
+        --mpt-accent: #4c9aff;
+        --mpt-accent-hover: #6facff;
+        --mpt-accent-text: #04162a;
+        --mpt-shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.25);
+    }
+}
+
+.stApp,
+[data-testid="stAppViewContainer"] {
+    background-color: var(--mpt-bg) !important;
+    color: var(--mpt-text) !important;
+}
+
+div[data-testid="stMainBlockContainer"] {
+    background-color: transparent !important;
+}
+
+/* 卡片式面板（脚本设置、视频设置等 st.container(border=True)）统一改用
+   浅色调面板 + 轻阴影，替代 Streamlit 默认的纯白/纯黑硬边框，减少浅色
+   模式下的刺眼对比，深色模式下也不会显得突兀。 */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    background-color: var(--mpt-surface) !important;
+    border-color: var(--mpt-border) !important;
+    border-radius: 10px !important;
+    box-shadow: var(--mpt-shadow);
+}
+
+button[kind="primary"] {
+    background-color: var(--mpt-accent) !important;
+    border-color: var(--mpt-accent) !important;
+    color: var(--mpt-accent-text) !important;
+}
+
+button[kind="primary"]:hover {
+    background-color: var(--mpt-accent-hover) !important;
+    border-color: var(--mpt-accent-hover) !important;
+}
+
+button[kind="secondary"] {
+    background-color: var(--mpt-surface) !important;
+    border-color: var(--mpt-border) !important;
+    color: var(--mpt-text) !important;
+}
+
+button[kind="secondary"]:hover {
+    border-color: var(--mpt-accent) !important;
+    color: var(--mpt-accent) !important;
+}
+
+a,
+a:visited {
+    color: var(--mpt-accent) !important;
+}
+
+hr {
+    border-color: var(--mpt-border) !important;
+}
+
+/* 输入类控件（文本框、下拉框、文本域）统一走同一套表面色，避免深色模式下
+   出现和背景一样深、看不清边界的输入框。 */
+div[data-baseweb="input"],
+div[data-baseweb="textarea"],
+div[data-baseweb="select"] > div,
+div[data-baseweb="base-input"] {
+    background-color: var(--mpt-surface) !important;
+    border-color: var(--mpt-border) !important;
+    color: var(--mpt-text) !important;
+}
+
+div[data-testid="stPopoverBody"] {
+    background-color: var(--mpt-surface) !important;
+    border-color: var(--mpt-border) !important;
+}
+
 header[data-testid="stHeader"],
 div[data-testid="stToolbar"],
 div[data-testid="stDecoration"],
@@ -162,9 +278,13 @@ div[class*="st-key-voice_mode_control"] [role="radiogroup"] > button p {
 }
 
 @media (prefers-color-scheme: dark) {
-    .mpt-brand__update {
+    :root:not([data-theme="light"]) .mpt-brand__update {
         color: #ff6b6b !important;
     }
+}
+
+:root[data-theme="dark"] .mpt-brand__update {
+    color: #ff6b6b !important;
 }
 
 /* Streamlit 会自动给 h1 追加一个标题锚点。品牌区已有版本号项目链接，额外的

@@ -215,6 +215,12 @@ sonilo_base_url = "https://api.sonilo.com"
 # 单次生成流连续无数据时的最长等待秒数；它不是整个请求的总耗时上限。
 sonilo_timeout = 600
 
+# Optional Jamendo catalog search for the background music "online" tab.
+# Register a free client_id at https://developer.jamendo.com. The WebUI can
+# also save this value, or you can set the JAMENDO_CLIENT_ID environment
+# variable instead.
+jamendo_client_id = ""
+
 # -----------------------------------------------------------------------------
 # LLM Providers / 大模型提供商
 # -----------------------------------------------------------------------------

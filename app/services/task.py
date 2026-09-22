@@ -642,8 +642,18 @@ def get_video_materials(
     audio_duration,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
 ):
-    if params.video_source == "local":
-        logger.info("\n\n## preprocess local materials")
+    if params.video_source == "product_media" and not params.video_materials:
+        # 产品图/视频上传为空时，静默改用关键词搜索，而不是直接失败——这是
+        # “产品素材优先，留空则退回 Pexels”入口的核心行为，让用户不用先决定
+        # 是否有素材就能直接生成。改写 video_source 后直接复用下面通用的
+        # 在线素材下载分支，不需要另外维护一份搜索逻辑。
+        logger.info(
+            "\n\n## no product media uploaded, falling back to Pexels search by keyword"
+        )
+        params.video_source = "pexels"
+
+    if params.video_source in ("local", "product_media"):
+        logger.info("\n\n## preprocess local/product media materials")
         materials = video.preprocess_video(
             materials=params.video_materials, clip_duration=params.video_clip_duration
         )
