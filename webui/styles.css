@@ -250,6 +250,12 @@ div[class*="st-key-voice_mode_control"] [role="radiogroup"] > button p {
     min-width: 0;
 }
 
+.mpt-brand__logo {
+    flex: 0 0 auto;
+    height: 2.5rem;
+    width: auto;
+}
+
 .mpt-brand__name {
     min-width: 0;
     font-size: 2.75rem;
@@ -320,6 +326,10 @@ div[class*="st-key-voice_mode_control"] [role="radiogroup"] > button p {
         gap: 0.45rem;
     }
 
+    .mpt-brand__logo {
+        height: 1.875rem;
+    }
+
     .mpt-brand__name {
         font-size: 1.875rem;
     }
@@ -337,6 +347,10 @@ div[class*="st-key-voice_mode_control"] [role="radiogroup"] > button p {
 @media (max-width: 480px) {
     .mpt-brand > span:first-child {
         gap: 0.35rem;
+    }
+
+    .mpt-brand__logo {
+        height: 1.5rem;
     }
 
     .mpt-brand__name {
@@ -509,6 +523,10 @@ div[class*="st-key-task_row_"] button[kind="secondary"] p {
    1200～1440px 的常见视口不足以稳定容纳四列英文标签；断点覆盖到 1500px，
    避免下拉内容和标题被裁切，真正的宽屏才恢复四列。 */
 @media (min-width: 701px) and (max-width: 1500px) {
+    .mpt-brand__logo {
+        height: 2.25rem;
+    }
+
     .mpt-brand__name {
         font-size: 2.25rem;
     }

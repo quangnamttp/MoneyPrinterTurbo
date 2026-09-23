@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import html
 import json
@@ -65,9 +66,11 @@ from app.services import version_checker
 from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
 
+_LOGO_PATH = os.path.join(utils.root_dir(), "image", "logo.png")
+
 st.set_page_config(
     page_title="ReelForge",
-    page_icon="🤖",
+    page_icon=_LOGO_PATH if os.path.isfile(_LOGO_PATH) else "🤖",
     layout="wide",
     initial_sidebar_state="auto",
     menu_items={
@@ -1735,8 +1738,29 @@ def _render_theme_style_override():
     st.markdown(f"<style>{_DARK_THEME_CSS_VARS}</style>", unsafe_allow_html=True)
 
 
+@st.cache_resource
+def _load_logo_data_uri() -> str | None:
+    """把 image/logo.png 编码成 base64 data URI，供页头内嵌 <img> 使用。
+
+    st.markdown 渲染的 HTML 里不能直接引用本机文件路径，只能是 URL 或
+    data URI，所以这里读一次文件转成 base64（缓存，不会每次 rerun 都读盘）。
+    """
+    try:
+        with open(_LOGO_PATH, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        return None
+    return f"data:image/png;base64,{encoded}"
+
+
 def _render_brand(available_update: str | None = None):
     """渲染项目名称、当前版本和可选的更新入口。"""
+    logo_data_uri = _load_logo_data_uri()
+    logo_img = (
+        f'<img class="mpt-brand__logo" src="{logo_data_uri}" alt="ReelForge" />'
+        if logo_data_uri
+        else ""
+    )
     update_link = ""
     if available_update:
         update_label = html.escape(
@@ -1754,6 +1778,7 @@ def _render_brand(available_update: str | None = None):
     st.markdown(
         f"""
         <h1 class="mpt-brand">
+            {logo_img}
             <span class="mpt-brand__name">ReelForge</span>
             <a class="mpt-brand__version"
                href="https://github.com/harry0703/MoneyPrinterTurbo"
