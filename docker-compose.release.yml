@@ -1,3 +1,17 @@
+# 这个文件拉取官方预构建镜像，只挂载 config.toml 和 storage（不挂载整个
+# 项目目录），语义上和 docker-compose.yml / docker-compose.claude.yml（本地
+# 构建、挂载整个项目目录做开发用）完全不同。历史上三个文件用了同一个
+# container_name，Docker 只允许同名容器存在一个，任何一次误跑本文件都会
+# 直接把正在用的开发容器换成这个预构建版本，且没有任何提示。这里改成
+# 独立的名字，避免两者互相覆盖，不论在哪台机器、哪次重启都不会再发生。
+#
+# 额外加一层保险：restart 改成 "no"。实测发现 Docker Desktop 崩溃重启后，
+# 即使改了名字，仍会有什么机制把本文件的容器重新拉起（具体触发源没有
+# 定位到——不是 Windows 计划任务，也不在 Docker Desktop 的 settings-store
+# 里），说明只靠改名不够彻底。原来的 restart: always 会导致只要被启动过
+# 一次，之后每次 Docker 重启都自动复活并占用 8501/8080 端口；改成
+# restart: "no" 后，就算哪次真的被误启动，Docker/系统重启后它也不会
+# 再自己回来。
 x-common-volumes: &common-volumes
   - ./config.toml:/MoneyPrinterTurbo/config.toml
   - ./storage:/MoneyPrinterTurbo/storage
@@ -5,17 +19,17 @@ x-common-volumes: &common-volumes
 services:
   webui:
     image: ghcr.io/harry0703/moneyprinterturbo:latest
-    container_name: "moneyprinterturbo-webui"
+    container_name: "moneyprinterturbo-webui-release"
     ports:
       - "127.0.0.1:8501:8501"
     command: [ "streamlit", "run", "./webui/Main.py", "--server.address=0.0.0.0", "--server.port=8501", "--browser.serverAddress=127.0.0.1", "--server.enableCORS=True", "--browser.gatherUsageStats=False", "--client.toolbarMode=minimal", "--logger.hideWelcomeMessage=True", "--server.showEmailPrompt=False" ]
     volumes: *common-volumes
-    restart: always
+    restart: "no"
   api:
     image: ghcr.io/harry0703/moneyprinterturbo:latest
-    container_name: "moneyprinterturbo-api"
+    container_name: "moneyprinterturbo-api-release"
     ports:
       - "127.0.0.1:8080:8080"
     command: [ "python3", "main.py" ]
     volumes: *common-volumes
-    restart: always
+    restart: "no"

@@ -7,12 +7,14 @@ toolbarMode = "minimal"
 [logger]
 hideWelcomeMessage = true
 
-# 原生控件（按钮、复选框、滑块、下拉框）的基础配色。深色模式由页面顶部栏的
-# 主题切换按钮通过 styles.css 的 CSS 变量在运行时覆盖，这里只提供服务器
-# 启动时的浅色默认值。
+# 原生控件（按钮、复选框、滑块、下拉框、st.dialog 弹窗、text_area 等）的
+# 基础配色。只维护一套浅色主题（不再提供深色模式）。这里的数值必须和
+# styles.css 里 :root 的 --mpt-* 变量保持一致——有些 Streamlit 原生元素
+# （尤其是 st.dialog 弹窗、st.text_area 的外层容器）直接读取这份配置，
+# CSS 变量覆盖不到它们，两边数值不一致就会出现颜色对不上的情况。
 [theme]
 base = "light"
 primaryColor = "#1668E3"
-backgroundColor = "#bfe6ff"
-secondaryBackgroundColor = "#f5fbff"
-textColor = "#16324a"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#e8eaed"
+textColor = "#1f2937"

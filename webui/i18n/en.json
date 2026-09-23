@@ -145,6 +145,8 @@
     "Top Right": "Top Right",
     "Bottom Left": "Bottom Left",
     "Bottom Right": "Bottom Right",
+    "Generation Log": "Generation Log (technical details)",
+    "Auto-Publish Hidden In Basic Mode": "Auto-publishing (TikTok/Instagram/YouTube via upload-post.com, a paid service) is hidden in basic mode. Turn on Advanced Mode to configure it.",
     "Video Fit Mode": "Source Frame Fit",
     "Fill and Crop": "Fill (center crop)",
     "Fit with Black Bars": "Fit (black bars)",

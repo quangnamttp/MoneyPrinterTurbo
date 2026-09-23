@@ -110,6 +110,21 @@ VOICE_MODE_TTS = "tts"
 VOICE_MODE_UPLOAD = "upload"
 VOICE_MODE_NONE = "none"
 LOOMLOOM_MAX_POLL_FAILURES = 5
+# 产品定位为纯越南语界面，暂时隐藏顶部栏的语言切换入口，界面锁定越南语。
+# 多语言的 i18n 文件和切换逻辑原样保留（不删除代码），后续需要恢复多语言时
+# 只需把这个常量改回 True。
+_SHOW_LANGUAGE_SELECTOR = False
+# 深色模式暂时下线：st.dialog 弹窗、st.text_area 外层容器等原生控件直接读取
+# .streamlit/config.toml 的静态浅色配置，运行时 CSS 变量覆盖不到，导致深色
+# 模式下这些控件持续显示浅色背景。相关代码（_toggle_ui_theme、
+# _render_theme_style_override、styles.css 里的暗色变量）原样保留，
+# 后续要重新支持深色模式且解决这个问题后，把这个常量改回 True 即可。
+_SHOW_THEME_TOGGLE = False
+# 基础模式下"设置"对话框只展示这几个常见、容易上手的 LLM 供应商，其余
+# （需要额外网关、企业账号或小众服务）收进高级模式，减少长下拉框的噪音。
+_BASIC_MODE_LLM_PROVIDER_IDS = frozenset(
+    {"moonshot", "openai", "gemini", "groq", "deepseek", "claude_code"}
+)
 # WebUI 按素材能力分组展示视频来源，但底层仍保存原有 video_source 值。
 # AI 视频组与设置页共用同一业务顺序：合作服务商优先，并按秘塔、OFox、
 # 胜算云、火山引擎排列；其余服务随后展示。这样两个入口的顺序一致，同时
@@ -612,13 +627,18 @@ def _initialize_session_state():
         if recovered is not None:
             st.session_state["cross_post_recovery_checked"] = True
 
-    saved_ui_language = config.ui.get("language", "")
-    browser_locale = st.context.locale
-    initial_ui_language = utils.resolve_ui_language(
-        saved_language=saved_ui_language,
-        browser_locale=browser_locale,
-        supported_languages=locales.keys(),
-    )
+    if _SHOW_LANGUAGE_SELECTOR:
+        saved_ui_language = config.ui.get("language", "")
+        browser_locale = st.context.locale
+        initial_ui_language = utils.resolve_ui_language(
+            saved_language=saved_ui_language,
+            browser_locale=browser_locale,
+            supported_languages=locales.keys(),
+        )
+    else:
+        # 产品定位为纯越南语界面，选择器已隐藏；这里直接锁定 "vi"，不再按
+        # 已保存配置或浏览器 locale 推断，避免不同浏览器环境下语言不一致。
+        initial_ui_language = "vi"
 
     defaults = {
         "video_subject": "",
@@ -668,7 +688,9 @@ def _initialize_session_state():
             "loomloom_script_duration_seconds", 60, 10, 600, int
         ),
         "ui_language": initial_ui_language,
-        "ui_theme": config.ui.get("theme", "") or "light",
+        # 深色模式入口已隐藏（见 _SHOW_THEME_TOGGLE），这里固定为 "light"，
+        # 不再读取旧会话可能残留的 "dark" 配置，避免开关消失后主题仍卡在深色。
+        "ui_theme": "light" if not _SHOW_THEME_TOGGLE else (config.ui.get("theme", "") or "light"),
         "show_advanced_settings": bool(config.ui.get("show_advanced_settings", False)),
         # 已落盘的本地素材允许用户只修改文案后继续复用。
         "local_video_materials": [],
@@ -1682,18 +1704,35 @@ def _render_advanced_settings_toggle():
         _set_runtime_config("ui", "show_advanced_settings", is_advanced)
 
 
-def _render_theme_attribute():
-    """把当前主题写入 <html data-theme=...>，供 styles.css 的显式主题规则读取。
+_DARK_THEME_CSS_VARS = """
+:root {
+    --mpt-bg: #12151c;
+    --mpt-surface: #1b1f29;
+    --mpt-surface-alt: #232834;
+    --mpt-border: #2c313c;
+    --mpt-text: #e8eaed;
+    --mpt-text-muted: #9aa1ac;
+    --mpt-accent: #4c9aff;
+    --mpt-accent-hover: #6facff;
+    --mpt-accent-text: #04162a;
+    --mpt-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.35);
+    --mpt-update-color: #ff6b6b;
+}
+"""
 
-    Streamlit 默认只跟随系统的浅色/深色偏好（prefers-color-scheme）。这里额外
-    设置一个属性，让用户主动切换的选择能覆盖系统偏好，且每次整页 rerun 都会
-    重新执行，因此始终反映最新的 session_state 选择。
+
+def _render_theme_style_override():
+    """深色模式下内联输出一份覆盖 :root 变量的 <style>，让配色真正生效。
+
+    早期实现是往页面注入一段 <script> 去设置 <html data-theme=...>，但
+    Streamlit 用 innerHTML 方式渲染 st.markdown 的内容，浏览器出于安全考虑
+    不会执行这种方式插入的 <script> 标签，导致按钮点了但配色纹丝不动。
+    <style> 标签没有这个限制，改成直接内联样式表覆盖变量，才能真正切换配色；
+    浅色是 styles.css 里 :root 的默认值，这里只在深色时才需要多输出一段。
     """
-    theme = html.escape(st.session_state.get("ui_theme", "light"))
-    st.markdown(
-        f"<script>document.documentElement.setAttribute('data-theme', '{theme}');</script>",
-        unsafe_allow_html=True,
-    )
+    if st.session_state.get("ui_theme", "light") != "dark":
+        return
+    st.markdown(f"<style>{_DARK_THEME_CSS_VARS}</style>", unsafe_allow_html=True)
 
 
 def _render_brand(available_update: str | None = None):
@@ -1742,7 +1781,7 @@ def _render_pending_version_check():
 
 def _render_top_bar():
     """渲染品牌、任务管理、设置和语言切换组成的页面顶部栏。"""
-    _render_theme_attribute()
+    _render_theme_style_override()
     # 顶部栏分为品牌区和操作区两个独立区域。窄屏下由 Streamlit
     # 将两个区域整体换行，操作区内部再根据剩余宽度自动换行。
     with st.container(key="top_bar"):
@@ -1770,17 +1809,18 @@ def _render_top_bar():
         ):
             _render_task_manager_entry()
 
-            current_theme = st.session_state.get("ui_theme", "light")
-            st.button(
-                tr("Dark Mode") if current_theme == "light" else tr("Light Mode"),
-                key="toggle_ui_theme_button",
-                type="secondary",
-                icon=":material/dark_mode:"
-                if current_theme == "light"
-                else ":material/light_mode:",
-                width="content",
-                on_click=_toggle_ui_theme,
-            )
+            if _SHOW_THEME_TOGGLE:
+                current_theme = st.session_state.get("ui_theme", "light")
+                st.button(
+                    tr("Dark Mode") if current_theme == "light" else tr("Light Mode"),
+                    key="toggle_ui_theme_button",
+                    type="secondary",
+                    icon=":material/dark_mode:"
+                    if current_theme == "light"
+                    else ":material/light_mode:",
+                    width="content",
+                    on_click=_toggle_ui_theme,
+                )
 
             st.button(
                 tr("Settings"),
@@ -1791,36 +1831,37 @@ def _render_top_bar():
                 on_click=_open_settings_dialog,
             )
 
-            language_codes = list(locales.keys())
-            selected_index = 0
-            for i, code in enumerate(language_codes):
-                if code == st.session_state.get("ui_language", ""):
-                    selected_index = i
+            if _SHOW_LANGUAGE_SELECTOR:
+                language_codes = list(locales.keys())
+                selected_index = 0
+                for i, code in enumerate(language_codes):
+                    if code == st.session_state.get("ui_language", ""):
+                        selected_index = i
 
-            selected_language_code = st.selectbox(
-                "Language / 语言",
-                options=language_codes,
-                index=selected_index,
-                format_func=lambda code: locales[code].get("Language", code),
-                key="top_language_code_selector",
-                label_visibility="collapsed",
-                width=180,
-            )
-            if selected_language_code:
-                previous_language = st.session_state.get("ui_language", "")
-                if selected_language_code != previous_language:
-                    logger.info(
-                        "UI language changed by user: "
-                        f"previous_language={previous_language or '<empty>'}, "
-                        f"selected_language={selected_language_code}"
-                    )
-                    st.session_state["ui_language"] = selected_language_code
-                    # 浏览器自动识别只影响当前会话；只有用户主动切换下拉框时才
-                    # 写入 config.toml，后续新会话将优先使用该明确选择。
-                    _set_runtime_config("ui", "language", selected_language_code)
-                    _save_runtime_config()
-                    # 切换语言后强制刷新，避免 selectbox 继续展示旧语言文案。
-                    st.rerun()
+                selected_language_code = st.selectbox(
+                    "Language / 语言",
+                    options=language_codes,
+                    index=selected_index,
+                    format_func=lambda code: locales[code].get("Language", code),
+                    key="top_language_code_selector",
+                    label_visibility="collapsed",
+                    width=180,
+                )
+                if selected_language_code:
+                    previous_language = st.session_state.get("ui_language", "")
+                    if selected_language_code != previous_language:
+                        logger.info(
+                            "UI language changed by user: "
+                            f"previous_language={previous_language or '<empty>'}, "
+                            f"selected_language={selected_language_code}"
+                        )
+                        st.session_state["ui_language"] = selected_language_code
+                        # 浏览器自动识别只影响当前会话；只有用户主动切换下拉框时才
+                        # 写入 config.toml，后续新会话将优先使用该明确选择。
+                        _set_runtime_config("ui", "language", selected_language_code)
+                        _save_runtime_config()
+                        # 切换语言后强制刷新，避免 selectbox 继续展示旧语言文案。
+                        st.rerun()
 
 
 support_locales = [
@@ -1985,7 +2026,10 @@ def _render_generation_logs(task_id):
     if not log_records:
         return
 
-    st.code("\n".join(log_records))
+    # 原始日志是给排查问题用的技术文本，默认收起，避免正常生成流程里
+    # 硬塞一大段看起来像代码的内容；需要时可以自己展开查看。
+    with st.expander(tr("Generation Log"), expanded=False):
+        st.code("\n".join(log_records))
 
 
 def _render_generation_task_snapshot(task_id, task):
@@ -3162,98 +3206,105 @@ def _render_settings_dialog():
         )
 
         with publish_config_panel:
-            st.write(tr("Automatically publish generated videos to social media using upload-post.com"))
-            st.info(
-                tr("Upload-Post Setup Guide").format(
-                    api_keys_url=UPLOAD_POST_API_KEYS_URL,
-                    manage_users_url=UPLOAD_POST_MANAGE_USERS_URL,
-                )
-            )
-
             is_enabled = config.app.get("upload_post_enabled", False)
-            is_auto = config.app.get("upload_post_auto_upload", False)
-
-            # 两个键各自独立:enabled 允许外部流程调用 Upload-Post,
-            # auto_upload 才决定渲染完成后是否自动发布。合并成一个复选框会在
-            # 两键不一致的配置下,仅打开设置对话框就把 enabled 改写为 False。
-            upload_post_enabled = st.checkbox(
-                tr("Enable Upload-Post Integration"),
-                value=is_enabled,
-                key="upload_post_enabled_checkbox"
-            )
-            if upload_post_enabled != is_enabled:
-                _set_runtime_config("app", "upload_post_enabled", upload_post_enabled)
-
-            upload_post_auto_upload = st.checkbox(
-                tr("Enable Auto-Publish"),
-                value=is_auto,
-                key="upload_post_auto_upload_checkbox"
-            )
-            if upload_post_auto_upload != is_auto:
-                _set_runtime_config("app", "upload_post_auto_upload", upload_post_auto_upload)
-
-            upload_post_api_key = st.text_input(
-                tr("Upload-Post API Key"),
-                value=config.app.get("upload_post_api_key", ""),
-                type="password",
-                help=tr("Upload-Post API Key Help").format(
-                    api_keys_url=UPLOAD_POST_API_KEYS_URL
-                ),
-                key="upload_post_api_key_input"
-            )
-            if upload_post_api_key != config.app.get("upload_post_api_key", ""):
-                _set_runtime_config("app", "upload_post_api_key", upload_post_api_key)
-
-            upload_post_username = st.text_input(
-                tr("Upload-Post Profile Username"),
-                value=config.app.get("upload_post_username", ""),
-                help=tr("Upload-Post Profile Username Help").format(
-                    manage_users_url=UPLOAD_POST_MANAGE_USERS_URL
-                ),
-                key="upload_post_username_input"
-            )
-            if upload_post_username != config.app.get("upload_post_username", ""):
-                _set_runtime_config("app", "upload_post_username", upload_post_username)
-
-            upload_post_platforms = st.multiselect(
-                tr("Platforms"),
-                options=["tiktok", "instagram", "youtube"],
-                default=config.app.get("upload_post_platforms", ["tiktok", "instagram"]),
-                help="Select platforms to publish to",
-                key="upload_post_platforms_multiselect"
-            )
-            if upload_post_platforms != config.app.get("upload_post_platforms", ["tiktok", "instagram"]):
-                _set_runtime_config("app", "upload_post_platforms", upload_post_platforms)
-
-            if "youtube" in upload_post_platforms:
-                yt_status_options = ["public", "private", "unlisted"]
-                yt_saved = config.app.get("upload_post_youtube_privacy_status", "public")
-                if yt_saved not in yt_status_options:
-                    yt_saved = "public"
-                upload_post_youtube_privacy_status = st.selectbox(
-                    tr("YouTube Privacy Status"),
-                    options=yt_status_options,
-                    index=yt_status_options.index(yt_saved),
-                    key="upload_post_youtube_privacy_status_selectbox"
+            # 自动发布依赖第三方付费服务 upload-post.com。基础模式下收起，
+            # 但如果已经启用过（is_enabled=True），继续展示，避免用户找不到
+            # 自己正在使用的发布配置入口。
+            show_auto_publish_settings = _is_advanced_mode() or is_enabled
+            if show_auto_publish_settings:
+                st.write(tr("Automatically publish generated videos to social media using upload-post.com"))
+                st.info(
+                    tr("Upload-Post Setup Guide").format(
+                        api_keys_url=UPLOAD_POST_API_KEYS_URL,
+                        manage_users_url=UPLOAD_POST_MANAGE_USERS_URL,
+                    )
                 )
-                if upload_post_youtube_privacy_status != config.app.get("upload_post_youtube_privacy_status", "public"):
-                    _set_runtime_config("app", "upload_post_youtube_privacy_status", upload_post_youtube_privacy_status)
 
-                # 受众声明只影响 YouTube 发布，不改变生成内容或其它平台的请求。
-                # 使用真正的布尔选项，避免把展示文字或字符串当成 API 参数。
-                saved_audience = config.app.get("upload_post_youtube_made_for_kids", False)
-                audience_labels = {False: tr("Not Made for Kids"), True: tr("Made for Kids")}
-                made_for_kids = st.selectbox(
-                    tr("YouTube Audience"),
-                    options=[False, True],
-                    # 非法配置保持未选择，不在打开设置时擅自改成非儿童声明。
-                    index=int(saved_audience) if isinstance(saved_audience, bool) else None,
-                    format_func=audience_labels.get,
-                    help=tr("YouTube Audience Help"),
-                    key="upload_post_youtube_made_for_kids_selectbox",
+                is_auto = config.app.get("upload_post_auto_upload", False)
+
+                # 两个键各自独立:enabled 允许外部流程调用 Upload-Post,
+                # auto_upload 才决定渲染完成后是否自动发布。合并成一个复选框会在
+                # 两键不一致的配置下,仅打开设置对话框就把 enabled 改写为 False。
+                upload_post_enabled = st.checkbox(
+                    tr("Enable Upload-Post Integration"),
+                    value=is_enabled,
+                    key="upload_post_enabled_checkbox"
                 )
-                if isinstance(made_for_kids, bool):
-                    _set_runtime_config("app", "upload_post_youtube_made_for_kids", made_for_kids)
+                if upload_post_enabled != is_enabled:
+                    _set_runtime_config("app", "upload_post_enabled", upload_post_enabled)
+
+                upload_post_auto_upload = st.checkbox(
+                    tr("Enable Auto-Publish"),
+                    value=is_auto,
+                    key="upload_post_auto_upload_checkbox"
+                )
+                if upload_post_auto_upload != is_auto:
+                    _set_runtime_config("app", "upload_post_auto_upload", upload_post_auto_upload)
+
+                upload_post_api_key = st.text_input(
+                    tr("Upload-Post API Key"),
+                    value=config.app.get("upload_post_api_key", ""),
+                    type="password",
+                    help=tr("Upload-Post API Key Help").format(
+                        api_keys_url=UPLOAD_POST_API_KEYS_URL
+                    ),
+                    key="upload_post_api_key_input"
+                )
+                if upload_post_api_key != config.app.get("upload_post_api_key", ""):
+                    _set_runtime_config("app", "upload_post_api_key", upload_post_api_key)
+
+                upload_post_username = st.text_input(
+                    tr("Upload-Post Profile Username"),
+                    value=config.app.get("upload_post_username", ""),
+                    help=tr("Upload-Post Profile Username Help").format(
+                        manage_users_url=UPLOAD_POST_MANAGE_USERS_URL
+                    ),
+                    key="upload_post_username_input"
+                )
+                if upload_post_username != config.app.get("upload_post_username", ""):
+                    _set_runtime_config("app", "upload_post_username", upload_post_username)
+
+                upload_post_platforms = st.multiselect(
+                    tr("Platforms"),
+                    options=["tiktok", "instagram", "youtube"],
+                    default=config.app.get("upload_post_platforms", ["tiktok", "instagram"]),
+                    help="Select platforms to publish to",
+                    key="upload_post_platforms_multiselect"
+                )
+                if upload_post_platforms != config.app.get("upload_post_platforms", ["tiktok", "instagram"]):
+                    _set_runtime_config("app", "upload_post_platforms", upload_post_platforms)
+
+                if "youtube" in upload_post_platforms:
+                    yt_status_options = ["public", "private", "unlisted"]
+                    yt_saved = config.app.get("upload_post_youtube_privacy_status", "public")
+                    if yt_saved not in yt_status_options:
+                        yt_saved = "public"
+                    upload_post_youtube_privacy_status = st.selectbox(
+                        tr("YouTube Privacy Status"),
+                        options=yt_status_options,
+                        index=yt_status_options.index(yt_saved),
+                        key="upload_post_youtube_privacy_status_selectbox"
+                    )
+                    if upload_post_youtube_privacy_status != config.app.get("upload_post_youtube_privacy_status", "public"):
+                        _set_runtime_config("app", "upload_post_youtube_privacy_status", upload_post_youtube_privacy_status)
+
+                    # 受众声明只影响 YouTube 发布，不改变生成内容或其它平台的请求。
+                    # 使用真正的布尔选项，避免把展示文字或字符串当成 API 参数。
+                    saved_audience = config.app.get("upload_post_youtube_made_for_kids", False)
+                    audience_labels = {False: tr("Not Made for Kids"), True: tr("Made for Kids")}
+                    made_for_kids = st.selectbox(
+                        tr("YouTube Audience"),
+                        options=[False, True],
+                        # 非法配置保持未选择，不在打开设置时擅自改成非儿童声明。
+                        index=int(saved_audience) if isinstance(saved_audience, bool) else None,
+                        format_func=audience_labels.get,
+                        help=tr("YouTube Audience Help"),
+                        key="upload_post_youtube_made_for_kids_selectbox",
+                    )
+                    if isinstance(made_for_kids, bool):
+                        _set_runtime_config("app", "upload_post_youtube_made_for_kids", made_for_kids)
+            else:
+                st.caption(tr("Auto-Publish Hidden In Basic Mode"))
 
         # 左侧面板 - 日志设置
         with left_config_panel:
@@ -3273,7 +3324,7 @@ def _render_settings_dialog():
         with middle_config_panel:
             # 下拉顺序、默认 label 和稳定 provider id 全部来自 Registry；locale
             # 只覆盖展示文案，不再让 Main.py 维护第二份 Provider 列表。
-            llm_provider_ids = [
+            all_llm_provider_ids = [
                 provider.provider_id for provider in LLM_PROVIDER_REGISTRY
             ]
             llm_provider_labels = {
@@ -3283,8 +3334,21 @@ def _render_settings_dialog():
             saved_llm_provider = config.app.get(
                 "llm_provider", DEFAULT_LLM_PROVIDER_ID
             ).lower()
-            if saved_llm_provider not in llm_provider_ids:
+            if saved_llm_provider not in all_llm_provider_ids:
                 saved_llm_provider = DEFAULT_LLM_PROVIDER_ID
+
+            if _is_advanced_mode():
+                llm_provider_ids = all_llm_provider_ids
+            else:
+                # 基础模式只保留几个常见、容易上手的供应商，其余收进高级模式。
+                # 已经在用的供应商仍然带上，避免静默换掉正在生效的配置。
+                llm_provider_ids = [
+                    provider_id
+                    for provider_id in all_llm_provider_ids
+                    if provider_id in _BASIC_MODE_LLM_PROVIDER_IDS
+                ]
+                if saved_llm_provider not in llm_provider_ids:
+                    llm_provider_ids.append(saved_llm_provider)
 
             llm_provider = stable_selectbox(
                 tr("LLM Provider"),
@@ -3591,352 +3655,363 @@ def _render_settings_dialog():
                 )
                 _save_material_api_keys("coverr_api_keys", coverr_api_key)
 
-            with st.container(border=True):
-                st.markdown(f"#### {tr('AI Video Generation APIs')}")
-                st.caption(tr("AI Video Generation APIs Help"))
+            # 这两张卡片对应的都是付费 AI 视频/图片生成服务。基础模式下收起，
+            # 但如果当前任务实际选用的正是这些来源之一，则继续显示，避免用户
+            # 找不到自己正在使用的 Provider 的 Key 配置入口。
+            _settings_dialog_active_video_source = str(
+                config.app.get("video_source", "pexels") or "pexels"
+            )
+            show_paid_video_ai_providers = _is_advanced_mode() or (
+                _settings_dialog_active_video_source
+                in VIDEO_SOURCE_GROUPS["ai_video"] + VIDEO_SOURCE_GROUPS["ai_image"]
+            )
+            if show_paid_video_ai_providers:
+                with st.container(border=True):
+                    st.markdown(f"#### {tr('AI Video Generation APIs')}")
+                    st.caption(tr("AI Video Generation APIs Help"))
 
-                # 视频生成 Provider 按赞助商优先展示，赞助商内部顺序
-                # 与 VIDEO_SOURCE_GROUPS 一致：秘塔、OFox、胜算云、火山引擎。
-                st.markdown(f"**{tr('Metaso MiniMax H3')}**")
-                metaso_api_key = st.text_input(
-                    tr("Metaso MiniMax API Key"),
-                    value=str(
-                        config.app.get("metaso_minimax_api_key", "") or ""
-                    ).strip(),
-                    type="password",
-                    help=tr("Metaso MiniMax API Key Help"),
-                    key="metaso_minimax_api_key_input",
-                )
-                _set_runtime_config(
-                    "app", "metaso_minimax_api_key", metaso_api_key.strip()
-                )
-                configured_metaso_base_url = str(
-                    config.app.get(
-                        "metaso_minimax_base_url",
-                        metaso_minimax.DEFAULT_BASE_URL,
-                    )
-                    or metaso_minimax.DEFAULT_BASE_URL
-                ).strip()
-                metaso_base_url = st.text_input(
-                    tr("Metaso MiniMax Base URL"),
-                    value=(
-                        ""
-                        if configured_metaso_base_url == metaso_minimax.DEFAULT_BASE_URL
-                        else configured_metaso_base_url
-                    ),
-                    placeholder=metaso_minimax.DEFAULT_BASE_URL,
-                    key="metaso_minimax_base_url_input",
-                )
-                _set_runtime_config(
-                    "app",
-                    "metaso_minimax_base_url",
-                    metaso_base_url.strip() or metaso_minimax.DEFAULT_BASE_URL,
-                )
-                configured_metaso_resolution = (
-                    str(
-                        config.app.get(
-                            "metaso_minimax_resolution",
-                            metaso_minimax.DEFAULT_RESOLUTION,
-                        )
-                    )
-                    .strip()
-                    .upper()
-                )
-                metaso_resolution_options = sorted(
-                    metaso_minimax.SUPPORTED_RESOLUTIONS,
-                    key=lambda value: value != metaso_minimax.DEFAULT_RESOLUTION,
-                )
-                resolution_is_valid = (
-                    configured_metaso_resolution
-                    in metaso_minimax.SUPPORTED_RESOLUTIONS
-                )
-                if not resolution_is_valid:
-                    # 分辨率直接影响计费。手工配置错误时保留原值并要求用户
-                    # 主动选择，不能在打开设置弹窗时静默改成价格更高的 2K。
-                    st.error(
-                        tr("Metaso MiniMax Invalid Resolution").format(
-                            value=configured_metaso_resolution,
-                            supported=", ".join(metaso_resolution_options),
-                        )
-                    )
-                metaso_resolution = st.selectbox(
-                    tr("Metaso MiniMax Resolution"),
-                    options=metaso_resolution_options,
-                    index=(
-                        metaso_resolution_options.index(configured_metaso_resolution)
-                        if resolution_is_valid
-                        else None
-                    ),
-                    key="metaso_minimax_resolution_input",
-                    help=tr("Metaso MiniMax Resolution Help"),
-                    placeholder=tr("Select Metaso MiniMax Resolution"),
-                )
-                if metaso_resolution is not None:
-                    _set_runtime_config(
-                        "app", "metaso_minimax_resolution", metaso_resolution
-                    )
-
-                st.divider()
-                st.markdown("**OfoxAI**")
-                st.caption(f"[OfoxAI]({OFOX_REFERRAL_URL}) · {tr('OFox AI Video Help')}")
-                ofox_api_key = st.text_input(
-                    tr("OFox API Key"),
-                    value=str(config.app.get("ofox_api_key", "") or ""),
-                    type="password",
-                    key="ofox_api_key_input",
-                )
-                _set_runtime_config("app", "ofox_api_key", ofox_api_key.strip())
-                ofox_model = st.text_input(
-                    tr("OFox Text-to-Video Model"),
-                    value=str(
-                        config.app.get(
-                            "ofox_text_to_video_model",
-                            ofox.DEFAULT_MODEL_ID,
-                        )
-                        or ofox.DEFAULT_MODEL_ID
-                    ),
-                    key="ofox_text_to_video_model_input",
-                )
-                _set_runtime_config(
-                    "app", "ofox_text_to_video_model", ofox_model.strip()
-                )
-                configured_ofox_base_url = str(
-                    config.app.get("ofox_base_url", ofox.DEFAULT_BASE_URL)
-                    or ofox.DEFAULT_BASE_URL
-                ).strip()
-                ofox_base_url = st.text_input(
-                    tr("OFox Base URL"),
-                    value=(
-                        ""
-                        if configured_ofox_base_url == ofox.DEFAULT_BASE_URL
-                        else configured_ofox_base_url
-                    ),
-                    placeholder=ofox.DEFAULT_BASE_URL,
-                    key="ofox_base_url_input",
-                )
-                _set_runtime_config(
-                    "app",
-                    "ofox_base_url",
-                    ofox_base_url.strip() or ofox.DEFAULT_BASE_URL,
-                )
-                ofox_vendor_options = [
-                    (tr("OFox Vendor BytePlus"), "byteplus"),
-                    (tr("OFox Vendor Volcengine"), "volcengine"),
-                    (tr("OFox Vendor Auto"), ""),
-                ]
-                configured_ofox_vendor = str(
-                    config.app.get("ofox_provider", ofox.DEFAULT_PROVIDER_TYPE)
-                    or ""
-                ).strip()
-                if configured_ofox_vendor not in {
-                    value for _, value in ofox_vendor_options
-                }:
-                    # 用户在 config.toml 手工钉定了其它厂商名时保留该选择，
-                    # 避免打开设置页就被下拉框覆盖回默认值。
-                    ofox_vendor_options.append(
-                        (configured_ofox_vendor, configured_ofox_vendor)
-                    )
-                selected_ofox_vendor = stable_selectbox(
-                    tr("OFox Upstream Vendor"),
-                    options=[value for _, value in ofox_vendor_options],
-                    default_value=configured_ofox_vendor,
-                    key="ofox_provider_select",
-                    format_func=lambda value: dict(
-                        (v, label) for label, v in ofox_vendor_options
-                    )[value],
-                    help=tr("OFox Upstream Vendor Help"),
-                )
-                _set_runtime_config("app", "ofox_provider", selected_ofox_vendor)
-
-                st.divider()
-                st.markdown(f"**{tr('Shengsuan Cloud AI Video')}**")
-                app_config_snapshot = config.snapshot_config_with_pending(config.app)
-                if (
-                    str(app_config_snapshot.get("llm_provider", "") or "").lower()
-                    == "shengsuanyun"
-                ):
-                    # 大模型 Provider 已选胜算云时，视频生成直接复用
-                    # 同一密钥，不再展示一个容易引起歧义的独立输入框。
-                    st.caption(tr("Shengsuan Cloud API Key Reused"))
-                else:
-                    configured_loomloom_token = str(
-                        app_config_snapshot.get("loomloom_api_token", "") or ""
-                    ).strip()
-                    loomloom_api_token = st.text_input(
-                        tr("Shengsuan Cloud API Key"),
-                        value=configured_loomloom_token,
-                        type="password",
-                        key="loomloom_api_token_input",
-                        help=tr("Shengsuan Cloud API Key Help"),
-                        placeholder=tr("Shengsuan Cloud API Key Placeholder"),
-                    ).strip()
-                    _set_runtime_config(
-                        "app", "loomloom_api_token", loomloom_api_token
-                    )
-
-                st.divider()
-                seedance_api_key_value = str(
-                    config.app.get("volcengine_seedance_api_key", "") or ""
-                ).strip()
-                shared_ark_api_key = str(
-                    config.app.get("volcengine_api_key", "") or ""
-                ).strip()
-                environment_ark_api_key = os.getenv(
-                    "VOLCENGINE_ARK_API_KEY", ""
-                ).strip()
-                seedance_reuses_llm_key = bool(
-                    not seedance_api_key_value
-                    and not environment_ark_api_key
-                    and shared_ark_api_key
-                )
-                seedance_title = f"**{tr('Volcano Engine Seedance')}**"
-                if seedance_reuses_llm_key:
-                    # 只有复用大模型密钥无法从当前输入框直接看出，保留该提示
-                    # 可以避免用户误以为必须重复填写；普通配置状态不再赘述。
-                    seedance_title += f" :blue[{tr('Reusing LLM API Key')}]"
-                st.markdown(seedance_title)
-                seedance_api_key = st.text_input(
-                    tr("Volcano Engine Ark API Key"),
-                    value=seedance_api_key_value,
-                    type="password",
-                    help=tr("Volcano Engine Ark API Key Help"),
-                    key="volcengine_seedance_api_key_input",
-                )
-                _set_runtime_config(
-                    "app", "volcengine_seedance_api_key", seedance_api_key.strip()
-                )
-                configured_seedance_model = str(
-                    config.app.get(
-                        "volcengine_seedance_model",
-                        volcengine_seedance.DEFAULT_MODEL_ID,
-                    )
-                    or volcengine_seedance.DEFAULT_MODEL_ID
-                ).strip()
-                seedance_model = st.text_input(
-                    tr("Volcano Engine Seedance Model"),
-                    # 内置默认值通过 placeholder 展示，用户自定义的
-                    # 模型或接入点 ID 仍作为真实值展示和保存。
-                    value=(
-                        ""
-                        if configured_seedance_model
-                        == volcengine_seedance.DEFAULT_MODEL_ID
-                        else configured_seedance_model
-                    ),
-                    placeholder=volcengine_seedance.DEFAULT_MODEL_ID,
-                    key="volcengine_seedance_model_input",
-                )
-                _set_runtime_config(
-                    "app",
-                    "volcengine_seedance_model",
-                    seedance_model.strip() or volcengine_seedance.DEFAULT_MODEL_ID,
-                )
-                configured_seedance_base_url = str(
-                    config.app.get(
-                        "volcengine_seedance_base_url",
-                        volcengine_seedance.DEFAULT_BASE_URL,
-                    )
-                    or volcengine_seedance.DEFAULT_BASE_URL
-                ).strip()
-                seedance_base_url = st.text_input(
-                    tr("Volcano Engine Ark Base URL"),
-                    value=(
-                        ""
-                        if configured_seedance_base_url
-                        == volcengine_seedance.DEFAULT_BASE_URL
-                        else configured_seedance_base_url
-                    ),
-                    placeholder=volcengine_seedance.DEFAULT_BASE_URL,
-                    key="volcengine_seedance_base_url_input",
-                )
-                _set_runtime_config(
-                    "app",
-                    "volcengine_seedance_base_url",
-                    seedance_base_url.strip() or volcengine_seedance.DEFAULT_BASE_URL,
-                )
-
-                st.divider()
-                wavespeed_api_key = _get_material_api_keys("wavespeed_api_keys")
-                st.markdown("**WaveSpeed**")
-                wavespeed_api_key = st.text_input(
-                    tr("WaveSpeed API Key"),
-                    value=wavespeed_api_key,
-                    type="password",
-                    key="wavespeed_api_keys_input",
-                )
-                _save_material_api_keys("wavespeed_api_keys", wavespeed_api_key)
-
-
-            with st.container(border=True):
-                st.markdown(f"#### {tr('AI Image Generation APIs')}")
-                st.caption(tr("AI Image Generation APIs Help"))
-                st.markdown(f"**{tr('OpenAI Compatible Text-to-Image')}**")
-
-                openai_image_base_url = st.text_input(
-                    tr("OpenAI Image Base URL"),
-                    value=str(config.app.get("openai_image_base_url", "") or ""),
-                    placeholder="https://api.openai.com/v1",
-                    key="openai_image_base_url_input",
-                )
-                _set_runtime_config(
-                    "app", "openai_image_base_url", openai_image_base_url.strip()
-                )
-
-                openai_image_api_key = _get_material_api_keys(
-                    "openai_image_api_keys"
-                )
-                openai_image_api_key = st.text_input(
-                    tr("OpenAI Image API Key"),
-                    value=openai_image_api_key,
-                    type="password",
-                    help=tr("OpenAI Image API Key Help"),
-                    key="openai_image_api_keys_input",
-                )
-                _save_material_api_keys(
-                    "openai_image_api_keys", openai_image_api_key
-                )
-
-                openai_image_model = st.text_input(
-                    tr("OpenAI Image Model"),
-                    value=str(config.app.get("openai_image_model", "") or ""),
-                    placeholder="gpt-image-2",
-                    key="openai_image_model_input",
-                )
-                _set_runtime_config(
-                    "app", "openai_image_model", openai_image_model.strip()
-                )
-                # 只展示参考值，不将 OpenAI 官方端点写成默认配置。
-                # 兼容服务的 Base URL 和模型 ID 没有统一值；留空不会让
-                # 用户在未知情时误连官方付费接口，也不会覆盖旧配置。
-                st.caption(tr("OpenAI Image Configuration Example"))
-
-                with st.expander(
-                    tr("OpenAI Image Advanced Settings"), expanded=False
-                ):
-                    openai_image_size = st.text_input(
-                        tr("OpenAI Image Size"),
-                        value=str(config.app.get("openai_image_size", "") or ""),
-                        placeholder="1024x1536",
-                        help=tr("OpenAI Image Size Help"),
-                        key="openai_image_size_input",
-                    )
-                    _set_runtime_config(
-                        "app", "openai_image_size", openai_image_size.strip()
-                    )
-
-                    openai_image_prompt_template = st.text_input(
-                        tr("OpenAI Image Prompt Template"),
+                    # 视频生成 Provider 按赞助商优先展示，赞助商内部顺序
+                    # 与 VIDEO_SOURCE_GROUPS 一致：秘塔、OFox、胜算云、火山引擎。
+                    st.markdown(f"**{tr('Metaso MiniMax H3')}**")
+                    metaso_api_key = st.text_input(
+                        tr("Metaso MiniMax API Key"),
                         value=str(
-                            config.app.get("openai_image_prompt_template", "") or ""
+                            config.app.get("metaso_minimax_api_key", "") or ""
+                        ).strip(),
+                        type="password",
+                        help=tr("Metaso MiniMax API Key Help"),
+                        key="metaso_minimax_api_key_input",
+                    )
+                    _set_runtime_config(
+                        "app", "metaso_minimax_api_key", metaso_api_key.strip()
+                    )
+                    configured_metaso_base_url = str(
+                        config.app.get(
+                            "metaso_minimax_base_url",
+                            metaso_minimax.DEFAULT_BASE_URL,
+                        )
+                        or metaso_minimax.DEFAULT_BASE_URL
+                    ).strip()
+                    metaso_base_url = st.text_input(
+                        tr("Metaso MiniMax Base URL"),
+                        value=(
+                            ""
+                            if configured_metaso_base_url == metaso_minimax.DEFAULT_BASE_URL
+                            else configured_metaso_base_url
                         ),
-                        placeholder="cinematic photo of {term}, photorealistic",
-                        help=tr("OpenAI Image Prompt Template Help"),
-                        key="openai_image_prompt_template_input",
+                        placeholder=metaso_minimax.DEFAULT_BASE_URL,
+                        key="metaso_minimax_base_url_input",
                     )
                     _set_runtime_config(
                         "app",
-                        "openai_image_prompt_template",
-                        openai_image_prompt_template.strip(),
+                        "metaso_minimax_base_url",
+                        metaso_base_url.strip() or metaso_minimax.DEFAULT_BASE_URL,
                     )
+                    configured_metaso_resolution = (
+                        str(
+                            config.app.get(
+                                "metaso_minimax_resolution",
+                                metaso_minimax.DEFAULT_RESOLUTION,
+                            )
+                        )
+                        .strip()
+                        .upper()
+                    )
+                    metaso_resolution_options = sorted(
+                        metaso_minimax.SUPPORTED_RESOLUTIONS,
+                        key=lambda value: value != metaso_minimax.DEFAULT_RESOLUTION,
+                    )
+                    resolution_is_valid = (
+                        configured_metaso_resolution
+                        in metaso_minimax.SUPPORTED_RESOLUTIONS
+                    )
+                    if not resolution_is_valid:
+                        # 分辨率直接影响计费。手工配置错误时保留原值并要求用户
+                        # 主动选择，不能在打开设置弹窗时静默改成价格更高的 2K。
+                        st.error(
+                            tr("Metaso MiniMax Invalid Resolution").format(
+                                value=configured_metaso_resolution,
+                                supported=", ".join(metaso_resolution_options),
+                            )
+                        )
+                    metaso_resolution = st.selectbox(
+                        tr("Metaso MiniMax Resolution"),
+                        options=metaso_resolution_options,
+                        index=(
+                            metaso_resolution_options.index(configured_metaso_resolution)
+                            if resolution_is_valid
+                            else None
+                        ),
+                        key="metaso_minimax_resolution_input",
+                        help=tr("Metaso MiniMax Resolution Help"),
+                        placeholder=tr("Select Metaso MiniMax Resolution"),
+                    )
+                    if metaso_resolution is not None:
+                        _set_runtime_config(
+                            "app", "metaso_minimax_resolution", metaso_resolution
+                        )
+
+                    st.divider()
+                    st.markdown("**OfoxAI**")
+                    st.caption(f"[OfoxAI]({OFOX_REFERRAL_URL}) · {tr('OFox AI Video Help')}")
+                    ofox_api_key = st.text_input(
+                        tr("OFox API Key"),
+                        value=str(config.app.get("ofox_api_key", "") or ""),
+                        type="password",
+                        key="ofox_api_key_input",
+                    )
+                    _set_runtime_config("app", "ofox_api_key", ofox_api_key.strip())
+                    ofox_model = st.text_input(
+                        tr("OFox Text-to-Video Model"),
+                        value=str(
+                            config.app.get(
+                                "ofox_text_to_video_model",
+                                ofox.DEFAULT_MODEL_ID,
+                            )
+                            or ofox.DEFAULT_MODEL_ID
+                        ),
+                        key="ofox_text_to_video_model_input",
+                    )
+                    _set_runtime_config(
+                        "app", "ofox_text_to_video_model", ofox_model.strip()
+                    )
+                    configured_ofox_base_url = str(
+                        config.app.get("ofox_base_url", ofox.DEFAULT_BASE_URL)
+                        or ofox.DEFAULT_BASE_URL
+                    ).strip()
+                    ofox_base_url = st.text_input(
+                        tr("OFox Base URL"),
+                        value=(
+                            ""
+                            if configured_ofox_base_url == ofox.DEFAULT_BASE_URL
+                            else configured_ofox_base_url
+                        ),
+                        placeholder=ofox.DEFAULT_BASE_URL,
+                        key="ofox_base_url_input",
+                    )
+                    _set_runtime_config(
+                        "app",
+                        "ofox_base_url",
+                        ofox_base_url.strip() or ofox.DEFAULT_BASE_URL,
+                    )
+                    ofox_vendor_options = [
+                        (tr("OFox Vendor BytePlus"), "byteplus"),
+                        (tr("OFox Vendor Volcengine"), "volcengine"),
+                        (tr("OFox Vendor Auto"), ""),
+                    ]
+                    configured_ofox_vendor = str(
+                        config.app.get("ofox_provider", ofox.DEFAULT_PROVIDER_TYPE)
+                        or ""
+                    ).strip()
+                    if configured_ofox_vendor not in {
+                        value for _, value in ofox_vendor_options
+                    }:
+                        # 用户在 config.toml 手工钉定了其它厂商名时保留该选择，
+                        # 避免打开设置页就被下拉框覆盖回默认值。
+                        ofox_vendor_options.append(
+                            (configured_ofox_vendor, configured_ofox_vendor)
+                        )
+                    selected_ofox_vendor = stable_selectbox(
+                        tr("OFox Upstream Vendor"),
+                        options=[value for _, value in ofox_vendor_options],
+                        default_value=configured_ofox_vendor,
+                        key="ofox_provider_select",
+                        format_func=lambda value: dict(
+                            (v, label) for label, v in ofox_vendor_options
+                        )[value],
+                        help=tr("OFox Upstream Vendor Help"),
+                    )
+                    _set_runtime_config("app", "ofox_provider", selected_ofox_vendor)
+
+                    st.divider()
+                    st.markdown(f"**{tr('Shengsuan Cloud AI Video')}**")
+                    app_config_snapshot = config.snapshot_config_with_pending(config.app)
+                    if (
+                        str(app_config_snapshot.get("llm_provider", "") or "").lower()
+                        == "shengsuanyun"
+                    ):
+                        # 大模型 Provider 已选胜算云时，视频生成直接复用
+                        # 同一密钥，不再展示一个容易引起歧义的独立输入框。
+                        st.caption(tr("Shengsuan Cloud API Key Reused"))
+                    else:
+                        configured_loomloom_token = str(
+                            app_config_snapshot.get("loomloom_api_token", "") or ""
+                        ).strip()
+                        loomloom_api_token = st.text_input(
+                            tr("Shengsuan Cloud API Key"),
+                            value=configured_loomloom_token,
+                            type="password",
+                            key="loomloom_api_token_input",
+                            help=tr("Shengsuan Cloud API Key Help"),
+                            placeholder=tr("Shengsuan Cloud API Key Placeholder"),
+                        ).strip()
+                        _set_runtime_config(
+                            "app", "loomloom_api_token", loomloom_api_token
+                        )
+
+                    st.divider()
+                    seedance_api_key_value = str(
+                        config.app.get("volcengine_seedance_api_key", "") or ""
+                    ).strip()
+                    shared_ark_api_key = str(
+                        config.app.get("volcengine_api_key", "") or ""
+                    ).strip()
+                    environment_ark_api_key = os.getenv(
+                        "VOLCENGINE_ARK_API_KEY", ""
+                    ).strip()
+                    seedance_reuses_llm_key = bool(
+                        not seedance_api_key_value
+                        and not environment_ark_api_key
+                        and shared_ark_api_key
+                    )
+                    seedance_title = f"**{tr('Volcano Engine Seedance')}**"
+                    if seedance_reuses_llm_key:
+                        # 只有复用大模型密钥无法从当前输入框直接看出，保留该提示
+                        # 可以避免用户误以为必须重复填写；普通配置状态不再赘述。
+                        seedance_title += f" :blue[{tr('Reusing LLM API Key')}]"
+                    st.markdown(seedance_title)
+                    seedance_api_key = st.text_input(
+                        tr("Volcano Engine Ark API Key"),
+                        value=seedance_api_key_value,
+                        type="password",
+                        help=tr("Volcano Engine Ark API Key Help"),
+                        key="volcengine_seedance_api_key_input",
+                    )
+                    _set_runtime_config(
+                        "app", "volcengine_seedance_api_key", seedance_api_key.strip()
+                    )
+                    configured_seedance_model = str(
+                        config.app.get(
+                            "volcengine_seedance_model",
+                            volcengine_seedance.DEFAULT_MODEL_ID,
+                        )
+                        or volcengine_seedance.DEFAULT_MODEL_ID
+                    ).strip()
+                    seedance_model = st.text_input(
+                        tr("Volcano Engine Seedance Model"),
+                        # 内置默认值通过 placeholder 展示，用户自定义的
+                        # 模型或接入点 ID 仍作为真实值展示和保存。
+                        value=(
+                            ""
+                            if configured_seedance_model
+                            == volcengine_seedance.DEFAULT_MODEL_ID
+                            else configured_seedance_model
+                        ),
+                        placeholder=volcengine_seedance.DEFAULT_MODEL_ID,
+                        key="volcengine_seedance_model_input",
+                    )
+                    _set_runtime_config(
+                        "app",
+                        "volcengine_seedance_model",
+                        seedance_model.strip() or volcengine_seedance.DEFAULT_MODEL_ID,
+                    )
+                    configured_seedance_base_url = str(
+                        config.app.get(
+                            "volcengine_seedance_base_url",
+                            volcengine_seedance.DEFAULT_BASE_URL,
+                        )
+                        or volcengine_seedance.DEFAULT_BASE_URL
+                    ).strip()
+                    seedance_base_url = st.text_input(
+                        tr("Volcano Engine Ark Base URL"),
+                        value=(
+                            ""
+                            if configured_seedance_base_url
+                            == volcengine_seedance.DEFAULT_BASE_URL
+                            else configured_seedance_base_url
+                        ),
+                        placeholder=volcengine_seedance.DEFAULT_BASE_URL,
+                        key="volcengine_seedance_base_url_input",
+                    )
+                    _set_runtime_config(
+                        "app",
+                        "volcengine_seedance_base_url",
+                        seedance_base_url.strip() or volcengine_seedance.DEFAULT_BASE_URL,
+                    )
+
+                    st.divider()
+                    wavespeed_api_key = _get_material_api_keys("wavespeed_api_keys")
+                    st.markdown("**WaveSpeed**")
+                    wavespeed_api_key = st.text_input(
+                        tr("WaveSpeed API Key"),
+                        value=wavespeed_api_key,
+                        type="password",
+                        key="wavespeed_api_keys_input",
+                    )
+                    _save_material_api_keys("wavespeed_api_keys", wavespeed_api_key)
+
+
+                with st.container(border=True):
+                    st.markdown(f"#### {tr('AI Image Generation APIs')}")
+                    st.caption(tr("AI Image Generation APIs Help"))
+                    st.markdown(f"**{tr('OpenAI Compatible Text-to-Image')}**")
+
+                    openai_image_base_url = st.text_input(
+                        tr("OpenAI Image Base URL"),
+                        value=str(config.app.get("openai_image_base_url", "") or ""),
+                        placeholder="https://api.openai.com/v1",
+                        key="openai_image_base_url_input",
+                    )
+                    _set_runtime_config(
+                        "app", "openai_image_base_url", openai_image_base_url.strip()
+                    )
+
+                    openai_image_api_key = _get_material_api_keys(
+                        "openai_image_api_keys"
+                    )
+                    openai_image_api_key = st.text_input(
+                        tr("OpenAI Image API Key"),
+                        value=openai_image_api_key,
+                        type="password",
+                        help=tr("OpenAI Image API Key Help"),
+                        key="openai_image_api_keys_input",
+                    )
+                    _save_material_api_keys(
+                        "openai_image_api_keys", openai_image_api_key
+                    )
+
+                    openai_image_model = st.text_input(
+                        tr("OpenAI Image Model"),
+                        value=str(config.app.get("openai_image_model", "") or ""),
+                        placeholder="gpt-image-2",
+                        key="openai_image_model_input",
+                    )
+                    _set_runtime_config(
+                        "app", "openai_image_model", openai_image_model.strip()
+                    )
+                    # 只展示参考值，不将 OpenAI 官方端点写成默认配置。
+                    # 兼容服务的 Base URL 和模型 ID 没有统一值；留空不会让
+                    # 用户在未知情时误连官方付费接口，也不会覆盖旧配置。
+                    st.caption(tr("OpenAI Image Configuration Example"))
+
+                    with st.expander(
+                        tr("OpenAI Image Advanced Settings"), expanded=False
+                    ):
+                        openai_image_size = st.text_input(
+                            tr("OpenAI Image Size"),
+                            value=str(config.app.get("openai_image_size", "") or ""),
+                            placeholder="1024x1536",
+                            help=tr("OpenAI Image Size Help"),
+                            key="openai_image_size_input",
+                        )
+                        _set_runtime_config(
+                            "app", "openai_image_size", openai_image_size.strip()
+                        )
+
+                        openai_image_prompt_template = st.text_input(
+                            tr("OpenAI Image Prompt Template"),
+                            value=str(
+                                config.app.get("openai_image_prompt_template", "") or ""
+                            ),
+                            placeholder="cinematic photo of {term}, photorealistic",
+                            help=tr("OpenAI Image Prompt Template Help"),
+                            key="openai_image_prompt_template_input",
+                        )
+                        _set_runtime_config(
+                            "app",
+                            "openai_image_prompt_template",
+                            openai_image_prompt_template.strip(),
+                        )
 
     _save_runtime_config()
 
@@ -4871,8 +4946,19 @@ def _render_script_settings(panel, params):
             video_languages = [
                 (tr("Auto Detect"), ""),
             ]
-            for code in support_locales:
-                video_languages.append((code, code))
+            saved_video_language = str(config.ui.get("video_language", "") or "")
+            if _is_advanced_mode():
+                for code in support_locales:
+                    video_languages.append((code, code))
+            else:
+                # 基础模式只保留越南语，其余语言收进高级模式。已经选过的话
+                # 仍然带上，避免静默换成自动检测、丢掉用户已有的选择。
+                if "vi-VN" in support_locales:
+                    video_languages.append(("vi-VN", "vi-VN"))
+                if saved_video_language and saved_video_language not in [
+                    value for _, value in video_languages
+                ]:
+                    video_languages.append((saved_video_language, saved_video_language))
 
             selected_language_code = stable_selectbox(
                 tr("Script Language"),
