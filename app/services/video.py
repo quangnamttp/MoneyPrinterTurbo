@@ -1623,7 +1623,14 @@ def generate_video(
                     bgm_effects.append(afx.AudioLoop(duration=video_clip.duration))
                 bgm_source_clip = clip_stack.enter_context(AudioFileClip(bgm_file))
                 bgm_clip = bgm_source_clip.with_effects(bgm_effects)
-                audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
+                # YouTube 背景音乐通常是用户想要的整段音乐体验（不是普通配乐），
+                # 且来源版权状态不确定，与配音混在一起既不是用户预期效果，
+                # 也可能放大版权风险；这里直接替换掉配音，只保留 YouTube 音频。
+                # 其它来源（本地/Jamendo）保持原有的"配乐 + 配音"混音行为。
+                if params.bgm_type == "youtube":
+                    audio_clip = bgm_clip
+                else:
+                    audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
             except Exception:
                 bgm_mix_succeeded = False
                 # 记录完整堆栈和稳定上下文，便于区分文件解码、MoviePy 特效和
@@ -1657,6 +1664,10 @@ def generate_video(
         }
         if output_bitrate:
             write_videofile_kwargs["bitrate"] = output_bitrate
+        # 默认对成片做锐化，弥补部分素材（尤其 AI 生成的图片/视频）偏糊的问题。
+        # 用 FFmpeg 原生 unsharp 滤镜在最终编码阶段处理，比逐帧 Python 滤镜快
+        # 得多；参数是经验值，比 unsharp 的最大强度低不少，避免过锐产生光晕。
+        write_videofile_kwargs["ffmpeg_params"] = ["-vf", "unsharp=5:5:1.5:5:5:0.0"]
         _write_videofile_with_codec_fallback(final_video_clip, **write_videofile_kwargs)
         return bgm_mix_succeeded
 
