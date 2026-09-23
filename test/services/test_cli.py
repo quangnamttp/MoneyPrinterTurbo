@@ -1510,7 +1510,7 @@ class TestCli(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0)
-        self.assertIn("Generate MoneyPrinterTurbo videos", result.stdout)
+        self.assertIn("Generate ReelForge videos", result.stdout)
         self.assertEqual(result.stderr, "")
 
 

@@ -10,6 +10,10 @@
 #   export CLAUDE_CODE_OAUTH_TOKEN="$(claude setup-token)"
 #   docker compose -f docker-compose.claude.yml up -d --build
 
+# 独立 project name，防止和 docker-compose.yml / docker-compose.release.yml
+# 共用同一个目录推断出的项目名，避免容器名/网络互相覆盖。
+name: reelforge-claude
+
 x-common-build: &common-build
   context: .
   dockerfile: Dockerfile.claude
@@ -24,7 +28,7 @@ x-common-environment: &common-environment
 services:
   webui:
     build: *common-build
-    container_name: "moneyprinterturbo-webui"
+    container_name: "reelforge-webui-claude"
     ports:
       - "127.0.0.1:8501:8501"
     command: [ "streamlit", "run", "./webui/Main.py", "--server.address=0.0.0.0", "--server.port=8501", "--browser.serverAddress=127.0.0.1", "--server.enableCORS=True", "--browser.gatherUsageStats=False", "--client.toolbarMode=minimal", "--logger.hideWelcomeMessage=True", "--server.showEmailPrompt=False" ]
@@ -33,7 +37,7 @@ services:
     restart: always
   api:
     build: *common-build
-    container_name: "moneyprinterturbo-api"
+    container_name: "reelforge-api-claude"
     ports:
       - "127.0.0.1:8080:8080"
     command: [ "python3", "main.py" ]

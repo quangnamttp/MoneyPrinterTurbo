@@ -70,10 +70,10 @@ body:
       required: true
   - type: input
     attributes:
-      label: MoneyPrinterTurbo 版本 | Version
+      label: ReelForge 版本 | Version
       description: |
-        您使用的 MoneyPrinterTurbo 版本
-        The version of MoneyPrinterTurbo you're using
+        您使用的 ReelForge 版本
+        The version of ReelForge you're using
       placeholder: v1.2.2, etc.
     validations:
       required: true

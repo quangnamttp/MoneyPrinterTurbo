@@ -34,14 +34,16 @@ div[data-testid="stMainBlockContainer"] {
 }
 
 /* st.dialog（"Cài đặt"弹窗）渲染在独立的 section[role="dialog"] 里，不在
-   .stApp 内部，因此上面的背景规则套不到它，会露出 body 的颜色。这里直接
-   按稳定的 stDialog testid 和它的直接父级（背后的遮罩层）分别上色。 */
+   .stApp 内部，因此上面的背景规则套不到它，会露出 body 的颜色。stDialog
+   testid 实际是铺满整个视口的背景层，section[role="dialog"] > div 才是
+   真正可见的对话框内容区（标签页+表单），两者都要上色，否则内容区会透出
+   deprecated 的深色遮罩，看起来像"设置面板变暗"。 */
 div[data-testid="stDialog"] {
     background-color: var(--mpt-surface) !important;
 }
 
 section[role="dialog"] > div {
-    background-color: rgba(15, 23, 42, 0.45) !important;
+    background-color: var(--mpt-surface) !important;
 }
 
 /* 卡片式面板（脚本设置、视频设置等 st.container(border=True)）统一改用

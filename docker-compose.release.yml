@@ -12,6 +12,11 @@
 # 一次，之后每次 Docker 重启都自动复活并占用 8501/8080 端口；改成
 # restart: "no" 后，就算哪次真的被误启动，Docker/系统重启后它也不会
 # 再自己回来。
+#
+# 独立 project name（同上），避免和另外两个 compose 文件共用目录推断出的
+# 项目名。用户确认目前不再使用这个文件（不需要跑官方预构建镜像做对比测试）。
+name: reelforge-release
+
 x-common-volumes: &common-volumes
   - ./config.toml:/MoneyPrinterTurbo/config.toml
   - ./storage:/MoneyPrinterTurbo/storage
@@ -19,7 +24,7 @@ x-common-volumes: &common-volumes
 services:
   webui:
     image: ghcr.io/harry0703/moneyprinterturbo:latest
-    container_name: "moneyprinterturbo-webui-release"
+    container_name: "reelforge-webui-release"
     ports:
       - "127.0.0.1:8501:8501"
     command: [ "streamlit", "run", "./webui/Main.py", "--server.address=0.0.0.0", "--server.port=8501", "--browser.serverAddress=127.0.0.1", "--server.enableCORS=True", "--browser.gatherUsageStats=False", "--client.toolbarMode=minimal", "--logger.hideWelcomeMessage=True", "--server.showEmailPrompt=False" ]
@@ -27,7 +32,7 @@ services:
     restart: "no"
   api:
     image: ghcr.io/harry0703/moneyprinterturbo:latest
-    container_name: "moneyprinterturbo-api-release"
+    container_name: "reelforge-api-release"
     ports:
       - "127.0.0.1:8080:8080"
     command: [ "python3", "main.py" ]

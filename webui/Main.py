@@ -252,12 +252,12 @@ _RUNTIME_CONFIG_SECTIONS = {
 }
 # 设置预设与密钥备份使用各自的文件标识。导入时先校验 schema 和版本，
 # 避免把任务记录、config.toml 或其它 JSON 误当成本功能的导出文件。
-SETTINGS_PRESET_SCHEMA = "moneyprinterturbo.settings-preset"
+SETTINGS_PRESET_SCHEMA = "reelforge.settings-preset"
 SETTINGS_PRESET_VERSION = 1
-SETTINGS_PRESET_FILE_NAME = "moneyprinterturbo-settings.json"
-KEY_BACKUP_SCHEMA = "moneyprinterturbo.key-backup"
+SETTINGS_PRESET_FILE_NAME = "reelforge-settings.json"
+KEY_BACKUP_SCHEMA = "reelforge.key-backup"
 KEY_BACKUP_VERSION = 1
-KEY_BACKUP_FILE_NAME = "moneyprinterturbo-keys.json"
+KEY_BACKUP_FILE_NAME = "reelforge-keys.json"
 # 预设只描述生成参数。素材、配音和配乐都是本机文件路径，预设通常要在另一台
 # 机器或另一个容器里导入，带上这些路径只会指向不存在的文件。
 PRESET_EXCLUDED_PARAM_KEYS = frozenset(

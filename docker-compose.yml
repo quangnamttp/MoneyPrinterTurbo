@@ -1,3 +1,8 @@
+# 显式声明 project name，避免 Compose 用目录名（三个 compose 文件所在目录
+# 相同）互相推断出同一个项目名，导致 Docker Desktop 把不同 compose 文件
+# 启动的容器当成同一个 stack、彼此覆盖。
+name: reelforge
+
 x-common-volumes: &common-volumes
   - ./:/MoneyPrinterTurbo
 
@@ -6,9 +11,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: "moneyprinterturbo-webui"
+    container_name: "reelforge-webui"
     ports:
       - "127.0.0.1:8501:8501"
+      - "127.0.0.1:80:8501"
     command: [ "streamlit", "run", "./webui/Main.py", "--server.address=0.0.0.0", "--server.port=8501", "--browser.serverAddress=127.0.0.1", "--server.enableCORS=True", "--browser.gatherUsageStats=False", "--client.toolbarMode=minimal", "--logger.hideWelcomeMessage=True", "--server.showEmailPrompt=False" ]
     volumes: *common-volumes
     restart: always
@@ -16,7 +22,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: "moneyprinterturbo-api"
+    container_name: "reelforge-api"
     ports:
       - "127.0.0.1:8080:8080"
     command: [ "python3", "main.py" ]
