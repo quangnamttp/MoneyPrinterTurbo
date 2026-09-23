@@ -144,6 +144,8 @@
     "YouTube License Disclaimer": "Note: this is only self-declared by the uploader, not a guarantee of copyright safety. The video can still be copyright-claimed on other platforms even when marked Creative Commons.",
     "YouTube BGM Start Seconds": "Start at second",
     "YouTube BGM Start Seconds Help": "Pick where in the song to start, e.g. skip the intro and jump straight to the chorus.",
+    "YouTube BGM Preview Help": "Listen right here — drag the player's seek bar to hear another part, or change the seconds field above and play again.",
+    "YouTube BGM Preview Unavailable": "Could not get a preview for this video.",
     "Download And Use This Clip": "Download and use this clip",
     "YouTube BGM Downloading": "Downloading and trimming YouTube audio...",
     "YouTube BGM Download Failed": "Failed to download YouTube audio: {error}",

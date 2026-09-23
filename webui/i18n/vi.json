@@ -140,6 +140,8 @@
     "YouTube License Disclaimer": "Lưu ý: đây chỉ là thông tin người đăng tự khai báo, không phải xác nhận an toàn bản quyền tuyệt đối. Video vẫn có thể bị đánh bản quyền khi đăng lên các nền tảng khác dù giấy phép ghi Creative Commons.",
     "YouTube BGM Start Seconds": "Bắt đầu từ giây thứ",
     "YouTube BGM Start Seconds Help": "Chọn thời điểm bắt đầu trong bài hát, ví dụ bỏ qua đoạn mở đầu để vào thẳng đoạn cao trào.",
+    "YouTube BGM Preview Help": "Nghe thử ngay tại đây — có thể kéo thanh trượt để nghe đoạn khác, hoặc đổi số giây bên trên rồi bấm nghe lại.",
+    "YouTube BGM Preview Unavailable": "Không lấy được bản nghe thử cho video này.",
     "Download And Use This Clip": "Tải và dùng đoạn này",
     "YouTube BGM Downloading": "Đang tải và cắt nhạc từ YouTube...",
     "YouTube BGM Download Failed": "Tải nhạc từ YouTube thất bại: {error}",

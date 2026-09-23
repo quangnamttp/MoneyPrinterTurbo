@@ -39,6 +39,7 @@ class YoutubeTrackInfo:
         duration: int,
         license_name: str | None,
         thumbnail: str = "",
+        preview_stream_url: str = "",
     ):
         self.video_id = video_id
         self.title = title or "Untitled"
@@ -46,6 +47,8 @@ class YoutubeTrackInfo:
         self.duration = max(0, int(duration or 0))
         self.license_name = (license_name or "").strip()
         self.thumbnail = thumbnail or ""
+        # 只给浏览器 <audio> 标签试听用，几小时后会过期，不能存起来长期用。
+        self.preview_stream_url = preview_stream_url or ""
 
     @property
     def license_status(self) -> str:
@@ -71,6 +74,26 @@ def _get_ydl_module():
             "yt-dlp is not installed; rebuild the Docker image to pick up requirements.txt"
         ) from exc
     return yt_dlp
+
+
+def _pick_preview_stream_url(info: dict) -> str:
+    """
+    从 yt_dlp 的 formats 列表里挑一个纯音频直链，给 <audio> 标签试听用。
+
+    优先选 acodec 有效、vcodec 为 none（纯音频）的格式，按比特率取最高的一个；
+    找不到时退回顶层的 info["url"]（可能是视频+音频合并流，仍然能播放）。
+    这个直链有 IP/时效限制，只用于当次页面的试听，不写入任何持久化配置。
+    """
+    formats = info.get("formats") or []
+    audio_only = [
+        f
+        for f in formats
+        if f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none") and f.get("url")
+    ]
+    if audio_only:
+        best = max(audio_only, key=lambda f: f.get("abr") or 0)
+        return str(best.get("url") or "")
+    return str(info.get("url") or "")
 
 
 def fetch_info(url: str) -> YoutubeTrackInfo:
@@ -109,6 +132,7 @@ def fetch_info(url: str) -> YoutubeTrackInfo:
         duration=duration,
         license_name=info.get("license"),
         thumbnail=str(info.get("thumbnail") or ""),
+        preview_stream_url=_pick_preview_stream_url(info),
     )
 
 

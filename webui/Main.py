@@ -6543,6 +6543,12 @@ def _render_youtube_bgm_picker(params) -> None:
         help=tr("YouTube BGM Start Seconds Help"),
     )
 
+    if info.preview_stream_url:
+        st.caption(tr("YouTube BGM Preview Help"))
+        st.audio(info.preview_stream_url, start_time=start_seconds)
+    else:
+        st.caption(tr("YouTube BGM Preview Unavailable"))
+
     if st.button(tr("Download And Use This Clip"), key="youtube_bgm_use_button"):
         with st.spinner(tr("YouTube BGM Downloading")):
             try:
