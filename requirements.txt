@@ -20,3 +20,6 @@ socksio==1.0.0
 pydub==0.25.1
 audioop-lts==0.2.2; python_version >= "3.13"
 litellm==1.86.2
+# YouTube 常改内部接口，这个版本落后太久会直接下载失败；遇到下载失败先检查
+# 是否有新版本 (https://pypi.org/project/yt-dlp/)，再排查其它原因。
+yt-dlp==2026.8.19

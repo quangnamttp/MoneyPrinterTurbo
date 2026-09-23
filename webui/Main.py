@@ -59,6 +59,7 @@ from app.services import (
 )
 from app.services import elevenlabs_music as elevenlabs_music_service
 from app.services import jamendo as jamendo_service
+from app.services import youtube_bgm as youtube_bgm_service
 from app.services import sonilo as sonilo_service
 from app.services import state as sm
 from app.services import task as tm
@@ -1555,6 +1556,9 @@ def _apply_restored_params(params):
         # Jamendo 曲目走已下载文件路径，不经过某个下拉框的业务值，
         # 因此直接写回它读取的配置项，而不是某个 widget key。
         _set_runtime_config("ui", "jamendo_bgm_file", params["bgm_file"])
+    if bgm_type == "youtube" and params.get("bgm_file"):
+        # YouTube 裁剪后的音频同样走已下载文件路径，处理方式与 Jamendo 一致。
+        _set_runtime_config("ui", "youtube_bgm_file", params["bgm_file"])
     _set_stable_widget_value("bgm_volume_select", params.get("bgm_volume", 0.2))
     if bgm_type == "preset" and params.get("bgm_file"):
         # 预设歌曲控件使用文件名作为稳定业务值。历史任务可能保存绝对路径或
@@ -6478,6 +6482,84 @@ def _render_jamendo_bgm_picker(params) -> None:
                     st.rerun()
 
 
+def _render_youtube_bgm_picker(params) -> None:
+    """
+    渲染"粘贴 YouTube 链接"背景音乐面板。
+
+    与 Jamendo 面板同样是"选中即生效"交互，但多两步：先只拉取元数据（标题/
+    时长/许可声明）供用户确认，用户填好起始秒数、点击"下载并使用这段"后才
+    真正下载、用 ffmpeg 裁剪、存为背景音乐文件。许可声明是 YouTube/上传者
+    自行提供的，不是 Content ID 的真实判定结果，界面上必须明确提示这只是
+    参考，不是版权安全保证。
+    """
+    url = st.text_input(
+        tr("YouTube BGM URL"),
+        value=st.session_state.get("youtube_bgm_url", ""),
+        key="youtube_bgm_url",
+        help=tr("YouTube BGM URL Help"),
+    )
+    if st.button(tr("Fetch YouTube Info"), key="youtube_bgm_fetch_button"):
+        st.session_state.pop("youtube_bgm_info_error", None)
+        st.session_state.pop("youtube_bgm_info", None)
+        try:
+            st.session_state["youtube_bgm_info"] = youtube_bgm_service.fetch_info(url)
+        except youtube_bgm_service.YoutubeBgmError as exc:
+            st.session_state["youtube_bgm_info_error"] = str(exc)
+
+    if st.session_state.get("youtube_bgm_info_error"):
+        st.error(
+            tr("YouTube BGM Fetch Failed").format(
+                error=st.session_state["youtube_bgm_info_error"]
+            )
+        )
+
+    selected_title = st.session_state.get("youtube_bgm_selected_title")
+    if st.session_state.get("bgm_type") == "youtube" and selected_title:
+        st.success(tr("YouTube BGM Selected").format(title=selected_title))
+
+    info = st.session_state.get("youtube_bgm_info")
+    if info is None:
+        return
+
+    st.write(f"**{info.title}** — {info.uploader}")
+    license_key = {
+        "creative_commons": "YouTube License Creative Commons",
+        "standard": "YouTube License Standard",
+        "unknown": "YouTube License Unknown",
+    }[info.license_status]
+    st.caption(tr(license_key))
+    st.caption(tr("YouTube License Disclaimer"))
+
+    max_start = max(0, info.duration - 1)
+    start_seconds = st.number_input(
+        tr("YouTube BGM Start Seconds"),
+        min_value=0,
+        max_value=max_start,
+        value=min(
+            st.session_state.get("youtube_bgm_start_seconds", 0), max_start
+        ),
+        step=5,
+        key="youtube_bgm_start_seconds",
+        help=tr("YouTube BGM Start Seconds Help"),
+    )
+
+    if st.button(tr("Download And Use This Clip"), key="youtube_bgm_use_button"):
+        with st.spinner(tr("YouTube BGM Downloading")):
+            try:
+                stored_name = youtube_bgm_service.download_and_trim_as_bgm(
+                    st.session_state.get("youtube_bgm_url", ""),
+                    start_seconds=start_seconds,
+                )
+            except youtube_bgm_service.YoutubeBgmError as exc:
+                st.error(tr("YouTube BGM Download Failed").format(error=str(exc)))
+            else:
+                st.session_state["bgm_type"] = "youtube"
+                st.session_state["youtube_bgm_selected_title"] = info.title
+                _set_runtime_config("ui", "bgm_type", "youtube")
+                _set_runtime_config("ui", "youtube_bgm_file", stored_name)
+                st.rerun()
+
+
 def _render_background_music_settings(params, elevenlabs_api_key_rendered=False):
     """
     渲染背景音乐来源与音量设置，并返回本次待保存的上传文件。
@@ -6507,7 +6589,7 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
     local_values = [value for _, value in local_bgm_options]
     online_ai_values = [value for _, value in online_ai_bgm_options]
     all_known_values = list(
-        dict.fromkeys(local_values + online_ai_values + ["jamendo"])
+        dict.fromkeys(local_values + online_ai_values + ["jamendo", "youtube"])
     )
 
     if "bgm_type" not in st.session_state:
@@ -6739,6 +6821,8 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
 
     with online_tab:
         _render_jamendo_bgm_picker(params)
+        st.divider()
+        _render_youtube_bgm_picker(params)
 
         advanced_mode = _is_advanced_mode()
         if advanced_mode or current_bgm_type in {"sonilo", "elevenlabs"}:
@@ -6876,6 +6960,12 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
     if params.bgm_type == "jamendo":
         params.bgm_file = (
             config.ui.get("jamendo_bgm_file", "")
+            if bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
+            else ""
+        )
+    if params.bgm_type == "youtube":
+        params.bgm_file = (
+            config.ui.get("youtube_bgm_file", "")
             if bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
             else ""
         )
